@@ -7,6 +7,9 @@ A WhatsApp bot for a tennis group. It coordinates who's free to play, schedules 
 Authors:
 
 * Pramod Immaneni <pramod.immaneni@gmail.com>
+
+Agents:
+
 * Google Antigravity, Anthropic Claude
 
 ## Setup

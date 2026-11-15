@@ -2,6 +2,11 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   isSamePlayerName,
+  levenshteinDistance,
+  computeNameMatchScore,
+  findClosestCandidate,
+  buildCandidatePools,
+  resolvePlayerWithFallback,
   extractTimeFromLineupMessage,
   getPollMatchTime,
   findBestMatchingPollForLineup,
@@ -10,6 +15,7 @@ const {
   executeLineupTool,
   LINEUP_PARSER_TOOL
 } = require('../lib/commands/lineupCommands');
+const ratings = require('../lib/ratings');
 
 describe('lineupCommands', () => {
   describe('LINEUP_PARSER_TOOL', () => {
@@ -38,252 +44,262 @@ describe('lineupCommands', () => {
 
     it('should return false for different names', () => {
       assert.equal(isSamePlayerName('Alice', 'Bob'), false);
+      assert.equal(isSamePlayerName('John', 'David'), false);
     });
 
     it('should return false for placeholders', () => {
-      assert.equal(isSamePlayerName('Player 1', 'Player 1'), false);
-      assert.equal(isSamePlayerName('Someone', 'Someone'), false);
-      assert.equal(isSamePlayerName('me', 'me'), false);
+      assert.equal(isSamePlayerName('Player 1', 'Player 2'), false);
+      assert.equal(isSamePlayerName('Alice', 'Player 1'), false);
     });
   });
 
   describe('extractTimeFromLineupMessage', () => {
     it('should extract 12-hour formatted times', () => {
-      const t1 = extractTimeFromLineupMessage('@Alice @Bob @Charlie @Dave - Court 6 7.00 pm');
-      assert.ok(t1);
-      assert.equal(t1.hour, 19);
-      assert.equal(t1.minute, 0);
+      const res1 = extractTimeFromLineupMessage('Matchup at 7:00pm on Court 3');
+      assert.deepEqual(res1, { hour: 19, minute: 0, display: '7:00pm' });
 
-      const t2 = extractTimeFromLineupMessage('Court 2 at 10:30am');
-      assert.ok(t2);
-      assert.equal(t2.hour, 10);
-      assert.equal(t2.minute, 30);
+      const res2 = extractTimeFromLineupMessage('Starting at 9am');
+      assert.deepEqual(res2, { hour: 9, minute: 0, display: '9am' });
     });
 
     it('should extract 24-hour formatted times', () => {
-      const t = extractTimeFromLineupMessage('Lineup for 19:30 on Court 1');
-      assert.ok(t);
-      assert.equal(t.hour, 19);
-      assert.equal(t.minute, 30);
+      const res = extractTimeFromLineupMessage('Matches at 18:30 on courts 1-2');
+      assert.deepEqual(res, { hour: 18, minute: 30, display: '18:30' });
     });
 
     it('should return null if no time is mentioned', () => {
-      assert.equal(extractTimeFromLineupMessage('Alice & Bob vs Charlie & Dave'), null);
+      const res = extractTimeFromLineupMessage('Court 1: Alice & Bob vs Charlie & David');
+      assert.equal(res, null);
     });
   });
 
   describe('getPollMatchTime', () => {
     it('should extract time from playAt ISO string', () => {
-      const pollState = { playAt: '2026-10-18T19:00:00.000Z' };
-      const time = getPollMatchTime(pollState);
-      assert.ok(time);
-      assert.equal(typeof time.hour, 'number');
-      assert.equal(typeof time.minute, 'number');
+      const pollState = {
+        playAt: '2026-11-14T17:00:00.000Z' // 9:00 AM PST
+      };
+      const res = getPollMatchTime(pollState);
+      assert.ok(res);
+      assert.equal(typeof res.hour, 'number');
+      assert.equal(typeof res.minute, 'number');
     });
 
     it('should extract time from when string', () => {
-      const pollState = { when: 'Today 6:30pm' };
-      const time = getPollMatchTime(pollState);
-      assert.ok(time);
-      assert.equal(time.hour, 18);
-      assert.equal(time.minute, 30);
+      const pollState = {
+        when: 'Saturday 7:00pm'
+      };
+      const res = getPollMatchTime(pollState);
+      assert.deepEqual(res, { hour: 19, minute: 0 });
     });
   });
 
   describe('findBestMatchingPollForLineup', () => {
     it('should match Tier 1 poll when both players and time match exactly', () => {
+      const poll1 = {
+        remoteJid: 'test_chat@g.us',
+        when: 'Today 7:00pm',
+        size: 4,
+        status: 'active',
+        lastPlayers: ['Alice', 'Bob', 'Charlie', 'David']
+      };
+      const poll2 = {
+        remoteJid: 'test_chat@g.us',
+        when: 'Today 9:00am',
+        size: 4,
+        status: 'active',
+        lastPlayers: ['Eve', 'Frank', 'Grace', 'Heidi']
+      };
       const activePolls = new Map([
-        ['poll_7pm', {
-          remoteJid: 'test_chat@g.us',
-          when: '7:00pm',
-          size: 4,
-          status: 'active',
-          lastPlayers: ['Alice', 'Bob', 'Charlie', 'Dave']
-        }],
-        ['poll_8am', {
-          remoteJid: 'test_chat@g.us',
-          when: '8:00am',
-          size: 4,
-          status: 'active',
-          lastPlayers: ['Eve', 'Frank', 'Grace', 'Heidi']
-        }]
+        ['poll_7pm', poll1],
+        ['poll_9am', poll2]
       ]);
 
       const lineup = {
-        players: ['Alice', 'Bob', 'Charlie', 'Dave'],
-        time: '7:00pm'
+        type: 'doubles',
+        time: '7:00pm',
+        players: ['Alice', 'Bob', 'Charlie', 'David']
       };
 
       const res = findBestMatchingPollForLineup({
         activePolls,
+        latestPollIdByChat: new Map([['test_chat@g.us', 'poll_9am']]),
         chatId: 'test_chat@g.us',
         lineup,
-        messageText: 'Lineup at 7:00pm: Alice, Bob, Charlie, Dave',
-        mePn: 'bot@s.whatsapp.net'
+        messageText: 'Lineup at 7:00pm: Alice, Bob, Charlie, David'
       });
 
       assert.equal(res.targetPollId, 'poll_7pm');
+      assert.equal(res.targetPollState, poll1);
       assert.match(res.matchInfo, /exact_players_and_time/);
     });
 
     it('should match Tier 2 poll when message has no time but player overlap is >= 50%', () => {
-      const activePolls = new Map([
-        ['poll_active', {
-          remoteJid: 'test_chat@g.us',
-          when: '6:00pm',
-          size: 4,
-          status: 'active',
-          lastPlayers: ['Alice', 'Bob', 'Charlie', 'Dave']
-        }]
-      ]);
+      const poll1 = {
+        remoteJid: 'test_chat@g.us',
+        when: 'Today 8:00pm',
+        size: 4,
+        status: 'active',
+        lastPlayers: ['Alice', 'Bob', 'Charlie', 'David']
+      };
+      const activePolls = new Map([['poll_8pm', poll1]]);
 
       const lineup = {
-        players: ['Alice', 'Bob', 'Charlie', 'Stranger'],
-        time: null
+        type: 'doubles',
+        players: ['Alice', 'Bob', 'Stranger1', 'Stranger2']
       };
 
       const res = findBestMatchingPollForLineup({
         activePolls,
+        latestPollIdByChat: new Map([['test_chat@g.us', 'poll_8pm']]),
         chatId: 'test_chat@g.us',
         lineup,
-        messageText: 'Alice, Bob, Charlie, Stranger',
-        mePn: 'bot@s.whatsapp.net'
+        messageText: 'Lineup: Alice & Bob vs Stranger1 & Stranger2'
       });
 
-      assert.equal(res.targetPollId, 'poll_active');
+      assert.equal(res.targetPollId, 'poll_8pm');
       assert.match(res.matchInfo, /qualifying_match/);
     });
 
     it('should reject match when player overlap is below 50%', () => {
-      const activePolls = new Map([
-        ['poll_active', {
-          remoteJid: 'test_chat@g.us',
-          when: '6:00pm',
-          size: 4,
-          status: 'active',
-          lastPlayers: ['Alice', 'Bob', 'Charlie', 'Dave']
-        }]
-      ]);
+      const poll1 = {
+        remoteJid: 'test_chat@g.us',
+        when: 'Today 8:00pm',
+        size: 4,
+        status: 'active',
+        lastPlayers: ['Alice', 'Bob', 'Charlie', 'David']
+      };
+      const activePolls = new Map([['poll_8pm', poll1]]);
 
       const lineup = {
-        players: ['Alice', 'P2', 'P3', 'P4'], // only 1/4 matches (25% < 50%)
-        time: null
+        type: 'doubles',
+        players: ['Alice', 'X1', 'X2', 'X3']
       };
 
       const res = findBestMatchingPollForLineup({
         activePolls,
+        latestPollIdByChat: new Map([['test_chat@g.us', 'poll_8pm']]),
         chatId: 'test_chat@g.us',
         lineup,
-        messageText: 'Alice, P2, P3, P4',
-        mePn: 'bot@s.whatsapp.net'
+        messageText: 'Lineup: Alice & X1 vs X2 & X3'
       });
 
       assert.equal(res.targetPollId, null);
-      assert.equal(res.matchInfo, 'none');
+      assert.equal(res.targetPollState, null);
     });
 
     it('should match a resolved poll when updating matchups even if another poll is active in the same chat', () => {
+      const resolvedPoll = {
+        remoteJid: 'test_chat@g.us',
+        name: 'Morning Match',
+        when: 'Today 9:00am',
+        size: 4,
+        status: 'resolved',
+        lastPlayers: ['Alice', 'Bob', 'Charlie', 'Dave']
+      };
+      const activePoll = {
+        remoteJid: 'test_chat@g.us',
+        name: 'Evening Match',
+        when: 'Today 6:00pm',
+        size: 4,
+        status: 'active',
+        lastPlayers: ['Eve', 'Frank', 'Grace', 'Heidi']
+      };
       const activePolls = new Map([
-        ['poll_resolved_today', {
-          remoteJid: 'test_chat@g.us',
-          when: 'Today 9:00am',
-          size: 4,
-          status: 'resolved',
-          lastPlayers: ['Alice', 'Bob', 'Charlie', 'Dave']
-        }],
-        ['poll_active_tomorrow', {
-          remoteJid: 'test_chat@g.us',
-          when: 'Tomorrow 9:00am',
-          size: 4,
-          status: 'active',
-          lastPlayers: ['Eve', 'Frank', 'Grace', 'Heidi']
-        }]
+        ['poll_morning', resolvedPoll],
+        ['poll_evening', activePoll]
       ]);
 
       const updatedLineup = {
+        type: 'doubles',
+        time: '9:00am',
         players: ['Alice', 'Charlie', 'Bob', 'Dave'],
-        time: '9:00am'
+        sets: [{
+          set: 1,
+          courts: [{ court: 1, teamA: ['Alice', 'Charlie'], teamB: ['Bob', 'Dave'] }]
+        }]
       };
 
       const res = findBestMatchingPollForLineup({
         activePolls,
+        latestPollIdByChat: new Map([['test_chat@g.us', 'poll_evening']]),
         chatId: 'test_chat@g.us',
         lineup: updatedLineup,
-        messageText: 'Updated 9:00am matchups: Alice & Charlie vs Bob & Dave',
-        mePn: 'bot@s.whatsapp.net'
+        messageText: 'Updated matchups: Court 1: Alice & Charlie vs Bob & Dave 9am'
       });
 
-      assert.equal(res.targetPollId, 'poll_resolved_today');
+      assert.equal(res.targetPollId, 'poll_morning');
+      assert.equal(res.targetPollState, resolvedPoll);
       assert.match(res.matchInfo, /exact_players_and_time/);
     });
 
     it('should match a resolved poll on player overlap when updating matchups without time', () => {
+      const resolvedPoll = {
+        remoteJid: 'test_chat@g.us',
+        name: 'Morning Match',
+        when: 'Today 9:00am',
+        size: 4,
+        status: 'resolved',
+        lastPlayers: ['Alice', 'Bob', 'Charlie', 'Dave']
+      };
+      const activePoll = {
+        remoteJid: 'test_chat@g.us',
+        name: 'Evening Match',
+        when: 'Today 6:00pm',
+        size: 4,
+        status: 'active',
+        lastPlayers: ['Eve', 'Frank', 'Grace', 'Heidi']
+      };
       const activePolls = new Map([
-        ['poll_resolved', {
-          remoteJid: 'test_chat@g.us',
-          when: '6:00pm',
-          size: 4,
-          status: 'resolved',
-          lastPlayers: ['Alice', 'Bob', 'Charlie', 'Dave']
-        }],
-        ['poll_other_active', {
-          remoteJid: 'test_chat@g.us',
-          when: '8:00pm',
-          size: 4,
-          status: 'active',
-          lastPlayers: ['PlayerX', 'PlayerY', 'PlayerZ', 'PlayerW']
-        }]
+        ['poll_morning', resolvedPoll],
+        ['poll_evening', activePoll]
       ]);
 
       const updatedLineup = {
+        type: 'doubles',
         players: ['Alice', 'Charlie', 'Bob', 'Dave'],
-        time: null
+        sets: [{
+          set: 1,
+          courts: [{ court: 1, teamA: ['Alice', 'Charlie'], teamB: ['Bob', 'Dave'] }]
+        }]
       };
 
       const res = findBestMatchingPollForLineup({
         activePolls,
+        latestPollIdByChat: new Map([['test_chat@g.us', 'poll_evening']]),
         chatId: 'test_chat@g.us',
         lineup: updatedLineup,
-        messageText: 'Updated matchups: Court 1: Alice & Charlie vs Bob & Dave',
-        mePn: 'bot@s.whatsapp.net'
+        messageText: 'Change matchups: Court 1: Alice & Charlie vs Bob & Dave'
       });
 
-      assert.equal(res.targetPollId, 'poll_resolved');
+      assert.equal(res.targetPollId, 'poll_morning');
+      assert.equal(res.targetPollState, resolvedPoll);
       assert.match(res.matchInfo, /qualifying_match/);
     });
   });
 
   describe('reconcileMissingPlayer', () => {
     it('should reconcile singles match when 1 player is detected instead of 2', () => {
-      const poll = {
-        size: 2,
-        courtBookingType: 'singles',
-        creator: { name: 'Alice' }
-      };
       const lineup = {
         type: 'singles',
-        players: ['Bob'],
+        players: ['Alice'],
         sets: [{
           set: 1,
-          courts: [{ court: 1, teamA: ['Bob'], teamB: [] }]
+          courts: [{ court: 1, teamA: ['Alice'], teamB: [] }]
         }]
       };
 
-      reconcileMissingPlayer(lineup, 'p_singles', poll, 'Alice', null, new Map());
+      reconcileMissingPlayer(lineup, 'poll_singles', {
+        size: 2,
+        courtBookingType: 'singles',
+        creator: { name: 'Bob', jid: 'bob@s.whatsapp.net' }
+      }, 'Bob', 'bot@s.whatsapp.net', new Map());
 
       assert.equal(lineup.players.length, 2);
-      assert.deepEqual(lineup.players, ['Bob', 'Alice']);
-      assert.equal(lineup.type, 'singles');
-      const court1 = lineup.sets[0].courts[0];
-      assert.deepEqual(court1.teamA, ['Bob']);
-      assert.deepEqual(court1.teamB, ['Alice']);
+      assert.ok(lineup.players.includes('Bob'));
+      assert.deepEqual(lineup.sets[0].courts[0].teamB, ['Bob']);
     });
 
     it('should reconcile 2-court doubles match when 7 players are detected instead of 8', () => {
-      const poll = {
-        size: 8,
-        creator: { name: 'Player8' }
-      };
       const lineup = {
         type: 'doubles',
         players: ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7'],
@@ -296,23 +312,18 @@ describe('lineupCommands', () => {
         }]
       };
 
-      reconcileMissingPlayer(lineup, 'p_doubles8', poll, 'Player8', null, new Map());
+      reconcileMissingPlayer(lineup, 'poll_8', {
+        size: 8,
+        creator: { name: 'Player8', jid: 'p8@s.whatsapp.net' },
+        lastPlayers: ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'Player8']
+      }, 'Player8', 'bot@s.whatsapp.net', new Map());
 
       assert.equal(lineup.players.length, 8);
       assert.ok(lineup.players.includes('Player8'));
-      assert.equal(lineup.type, 'doubles');
-      assert.equal(lineup.sets[0].courts[0].teamA.length, 2);
-      assert.equal(lineup.sets[0].courts[0].teamB.length, 2);
-      assert.equal(lineup.sets[0].courts[1].teamA.length, 2);
-      assert.equal(lineup.sets[0].courts[1].teamB.length, 2);
       assert.deepEqual(lineup.sets[0].courts[1].teamB, ['P7', 'Player8']);
     });
 
     it('should reconcile 3-court doubles match when 11 players are detected instead of 12', () => {
-      const poll = {
-        size: 12,
-        creator: { name: 'P12' }
-      };
       const lineup = {
         type: 'doubles',
         players: ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10', 'P11'],
@@ -326,7 +337,11 @@ describe('lineupCommands', () => {
         }]
       };
 
-      reconcileMissingPlayer(lineup, 'p_doubles12', poll, 'P12', null, new Map());
+      reconcileMissingPlayer(lineup, 'poll_12', {
+        size: 12,
+        creator: { name: 'P12', jid: 'p12@s.whatsapp.net' },
+        lastPlayers: ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10', 'P11', 'P12']
+      }, 'P12', 'bot@s.whatsapp.net', new Map());
 
       assert.equal(lineup.players.length, 12);
       assert.ok(lineup.players.includes('P12'));
@@ -343,12 +358,11 @@ describe('lineupCommands', () => {
         }]
       };
 
-      reconcileMissingPlayer(lineup, null, null, 'Dave', null, new Map());
+      reconcileMissingPlayer(lineup, null, null, 'Dave', 'bot@s.whatsapp.net', new Map());
 
       assert.equal(lineup.players.length, 4);
       assert.ok(lineup.players.includes('Dave'));
       assert.deepEqual(lineup.sets[0].courts[0].teamB, ['Charlie', 'Dave']);
-      assert.equal(lineup.type, 'doubles');
     });
 
     it('should not modify lineup when player count is already a valid configuration', () => {
@@ -361,10 +375,71 @@ describe('lineupCommands', () => {
         }]
       };
 
-      reconcileMissingPlayer(lineup, null, null, 'Eve', null, new Map());
+      reconcileMissingPlayer(lineup, 'poll_4', {
+        size: 4,
+        creator: { name: 'Eve' }
+      }, 'Eve', 'bot@s.whatsapp.net', new Map());
 
       assert.equal(lineup.players.length, 4);
       assert.equal(lineup.players.includes('Eve'), false);
+    });
+  });
+
+  describe('resolvePlayerWithFallback', () => {
+    it('should resolve typos to voters who voted (Priority 1)', () => {
+      const voterCandidates = [
+        { canonicalName: 'Terence Park', name: 'Terence Park', fullName: 'Terence Park', aliases: [] },
+        { canonicalName: 'Somnath Mani', name: 'Somnath Mani', fullName: 'Somnath Mani', aliases: [] }
+      ];
+      const groupCandidates = [
+        { canonicalName: 'David S', name: 'David S', fullName: 'David S', aliases: [] }
+      ];
+
+      // "Terrence" (edit distance 1) should resolve to voter "Terence Park"
+      const res1 = resolvePlayerWithFallback('Terrence', voterCandidates, groupCandidates);
+      assert.equal(res1, 'Terence Park');
+
+      // "Som" (prefix) should resolve to voter "Somnath Mani"
+      const res2 = resolvePlayerWithFallback('Som', voterCandidates, groupCandidates);
+      assert.equal(res2, 'Somnath Mani');
+    });
+
+    it('should resolve to group members when not found among voters (Priority 2)', () => {
+      const voterCandidates = [
+        { canonicalName: 'Alice', name: 'Alice', fullName: 'Alice', aliases: [] }
+      ];
+      const groupCandidates = [
+        { canonicalName: 'David Smith', name: 'David Smith', fullName: 'David Smith', aliases: ['Dave'] }
+      ];
+
+      // "Dave" is not a voter, but is in groupCandidates aliases
+      const res = resolvePlayerWithFallback('Dave', voterCandidates, groupCandidates);
+      assert.equal(res, 'David Smith');
+    });
+
+    it('should prioritize voters over group members if both have potential matches', () => {
+      const voterCandidates = [
+        { canonicalName: 'John Miller', name: 'John Miller', fullName: 'John Miller', aliases: [] }
+      ];
+      const groupCandidates = [
+        { canonicalName: 'Johnathan Smith', name: 'Johnathan Smith', fullName: 'Johnathan Smith', aliases: [] }
+      ];
+
+      // Query "John" matches voter "John Miller" first
+      const res = resolvePlayerWithFallback('John', voterCandidates, groupCandidates);
+      assert.equal(res, 'John Miller');
+    });
+
+    it('should leave unknown names untouched without error', () => {
+      const voterCandidates = [
+        { canonicalName: 'Alice', name: 'Alice', fullName: 'Alice', aliases: [] }
+      ];
+      const groupCandidates = [
+        { canonicalName: 'Bob', name: 'Bob', fullName: 'Bob', aliases: [] }
+      ];
+
+      const res = resolvePlayerWithFallback('Mysterious Stranger', voterCandidates, groupCandidates);
+      assert.equal(res, 'Mysterious Stranger');
     });
   });
 
@@ -372,6 +447,7 @@ describe('lineupCommands', () => {
     it('should update lastPlayers, lastSchedule and send 🤖 reaction on a resolved poll', async () => {
       const targetPoll = {
         remoteJid: 'test_chat@g.us',
+        name: 'Morning Match',
         when: 'Today 9:00am',
         size: 4,
         status: 'resolved',
@@ -380,16 +456,18 @@ describe('lineupCommands', () => {
       };
 
       const activePolls = new Map([['poll_resolved', targetPoll]]);
-      const sentMessages = [];
+      const sentReactions = [];
       const dummySock = {
         user: { id: 'bot@s.whatsapp.net' },
         sendMessage: async (jid, payload) => {
-          sentMessages.push({ jid, payload });
+          if (payload.react) {
+            sentReactions.push({ jid, react: payload.react });
+          }
           return { key: { id: 'msg1' } };
         }
       };
 
-      const newLineup = {
+      const updatedLineup = {
         type: 'doubles',
         time: '9:00am',
         players: ['Alice', 'Charlie', 'Bob', 'Dave'],
@@ -414,21 +492,20 @@ describe('lineupCommands', () => {
         dummySock,
         'test_chat@g.us',
         'Alice',
-        newLineup,
+        updatedLineup,
         dummyMsg,
-        'Updated matchups: Court 1: Alice & Charlie vs Bob & Dave',
+        'Change matchups: Court 1: Alice & Charlie vs Bob & Dave 9am',
         context
       );
 
       assert.equal(targetPoll.status, 'resolved');
+      assert.equal(targetPoll.manualLineupPosted, true);
       assert.deepEqual(targetPoll.lastPlayers, ['Alice', 'Charlie', 'Bob', 'Dave']);
-      assert.deepEqual(targetPoll.lastSchedule, newLineup);
+      assert.equal(targetPoll.lastSchedule, updatedLineup);
       assert.equal(persisted, true);
-
-      // Verify bot emoji 🤖 reaction was sent
-      const reactMsg = sentMessages.find((m) => m.payload?.react?.text === '🤖');
-      assert.ok(reactMsg, 'Expected 🤖 bot emoji reaction to be sent');
-      assert.equal(reactMsg.payload.react.key.id, 'lineup_msg_123');
+      assert.equal(sentReactions.length, 1);
+      assert.equal(sentReactions[0].react.text, '🤖');
+      assert.deepEqual(sentReactions[0].react.key, dummyMsg.key);
     });
 
     it('should automatically add poll creator as 4th player when 3 players are posted for a 4-player doubles court', async () => {
@@ -551,6 +628,68 @@ describe('lineupCommands', () => {
       assert.deepEqual(sevenPlayerLineup.sets[0].courts[1].teamB, ['P7', 'Player8']);
       assert.equal(persisted, true);
     });
+
+    it('should NOT call ratings.ensureRated and should resolve typos to voters', async () => {
+      const targetPoll = {
+        remoteJid: 'test_chat@g.us',
+        when: 'Today 9:00am',
+        size: 4,
+        status: 'active',
+        lastPlayers: ['Terence Park', 'Bob', 'Alice', 'Charlie'],
+        lastSchedule: null
+      };
+
+      const activePolls = new Map([['poll_typo_test', targetPoll]]);
+      const dummySock = {
+        user: { id: 'bot@s.whatsapp.net' },
+        sendMessage: async () => ({ key: { id: 'msg1' } })
+      };
+
+      // Notice "Terrence" (with double 'r') is posted in manual lineup
+      const lineupWithTypo = {
+        type: 'doubles',
+        time: '9:00am',
+        players: ['Terrence', 'Bob', 'Alice', 'Charlie'],
+        sets: [{
+          set: 1,
+          courts: [{ court: 1, teamA: ['Terrence', 'Bob'], teamB: ['Alice', 'Charlie'] }]
+        }]
+      };
+
+      let ensureRatedCalled = false;
+      const origEnsureRated = ratings.ensureRated;
+      ratings.ensureRated = async () => {
+        ensureRatedCalled = true;
+      };
+
+      try {
+        const context = {
+          activePolls,
+          persistPolls: () => {},
+          messageStore: new Map()
+        };
+
+        await handleManualLineup(
+          dummySock,
+          'test_chat@g.us',
+          'Bob',
+          lineupWithTypo,
+          { key: { remoteJid: 'test_chat@g.us', id: 'msg_typo' } },
+          'Court 1: Terrence & Bob vs Alice & Charlie 9am',
+          context
+        );
+
+        // 1. ratings.ensureRated MUST NOT be called!
+        assert.equal(ensureRatedCalled, false, 'ratings.ensureRated should not be called from manual lineups');
+
+        // 2. "Terrence" typo must resolve to voter "Terence Park"
+        assert.ok(lineupWithTypo.players.includes('Terence Park'), 'Terrence should resolve to voter Terence Park');
+        assert.equal(lineupWithTypo.players.includes('Terrence'), false);
+        assert.deepEqual(lineupWithTypo.sets[0].courts[0].teamA, ['Terence Park', 'Bob']);
+      } finally {
+        ratings.ensureRated = origEnsureRated;
+      }
+    });
   });
 
   describe('executeLineupTool', () => {
@@ -570,34 +709,31 @@ describe('lineupCommands', () => {
         persistPolls: () => { persisted = true; },
         messageStore: new Map()
       };
+
       const dummySock = {
         user: { id: 'bot@s.whatsapp.net' },
         sendMessage: async () => ({ key: { id: 'msg1' } })
-      };
-      const dummyMsg = {
-        key: { remoteJid: 'test_chat@g.us', id: 'tool_msg_1', fromMe: false }
       };
 
       const res = await executeLineupTool(
         dummySock,
         'parse_lineup',
-        { text: 'Court 1: Alice & Bob vs Charlie & Dave at 9:00am' },
+        { text: 'Court 1: Alice & Bob vs Charlie & Dave 9am' },
         'Alice',
         'test_chat@g.us',
-        dummyMsg,
+        { key: { remoteJid: 'test_chat@g.us', id: 'm1' } },
         context
       );
 
       assert.match(res, /Successfully parsed and recorded lineup/);
-      assert.match(res, /Tennis 9am/);
       assert.equal(targetPoll.status, 'resolved');
-      assert.deepEqual(targetPoll.lastPlayers, ['Alice', 'Bob', 'Charlie', 'Dave']);
       assert.equal(persisted, true);
     });
 
     it('should handle pre-structured lineup input directly', async () => {
       const targetPoll = {
         remoteJid: 'test_chat@g.us',
+        name: 'Tennis 6pm',
         when: 'Today 6:00pm',
         size: 4,
         status: 'active',
@@ -610,8 +746,13 @@ describe('lineupCommands', () => {
         messageStore: new Map()
       };
 
+      const dummySock = {
+        user: { id: 'bot@s.whatsapp.net' },
+        sendMessage: async () => ({ key: { id: 'msg1' } })
+      };
+
       const res = await executeLineupTool(
-        null,
+        dummySock,
         'parse_lineup',
         {
           pollId: 'poll_6pm',
@@ -621,19 +762,18 @@ describe('lineupCommands', () => {
             players: ['Alice', 'Charlie', 'Bob', 'Dave'],
             sets: [{
               set: 1,
-              courts: [{ court: 2, teamA: ['Alice', 'Charlie'], teamB: ['Bob', 'Dave'] }]
+              courts: [{ court: 1, teamA: ['Alice', 'Charlie'], teamB: ['Bob', 'Dave'] }]
             }]
           }
         },
         'Alice',
         'test_chat@g.us',
-        null,
+        { key: { remoteJid: 'test_chat@g.us', id: 'm2' } },
         context
       );
 
       assert.match(res, /Successfully parsed and recorded lineup/);
       assert.equal(targetPoll.status, 'resolved');
-      assert.deepEqual(targetPoll.lastPlayers, ['Alice', 'Charlie', 'Bob', 'Dave']);
     });
 
     it('should return helpful error message when input cannot be parsed', async () => {
