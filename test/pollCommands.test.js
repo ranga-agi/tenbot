@@ -3,9 +3,15 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const scvcc = require('../lib/scvcc');
 const groupsConfig = require('../lib/groupsConfig');
+const namesStore = require('../lib/names');
+namesStore.setName('278081952608440@lid', 'Vijay Parthasarathy', ['VJ']);
+namesStore.setName('vik@lid', 'Vik', ['Vik']);
+namesStore.setName('deepak@lid', 'DD', ['Deepak']);
+namesStore.setName('165777365799110@lid', 'Conrad', [], '14085559110@s.whatsapp.net', 'Conrad Rodricks');
 const {
   isValidPlayerCount,
   getNextValidPlayerCount,
+  partitionMatchSlots,
   getFirstSlotNumber,
   extractFixedPairsFromText,
   parsePollCreationText,
@@ -50,7 +56,12 @@ const {
   bufferPendingVote,
   flushPendingPollVotes,
   pendingPollVotes,
-  getMessageSecret
+  getMessageSecret,
+  processPollVoteEvent,
+  cancelOrDeletePoll,
+  normalizeCourtPreference,
+  getCourtPreferenceRank,
+  sortCourtsByPreference
 } = require('../lib/commands/pollCommands');
 const { sanitizeActivePolls } = require('../lib/pollStore');
 const { extractCommonFlags } = require('../lib/recurringPolls');
@@ -4808,7 +4819,8 @@ describe('pollCommands', () => {
         groupsConfig.getGroupConfig = () => ({
           name: 'Test Group',
           sport: 'tennis',
-          courtBookingEnabled: true
+          courtBookingEnabled: true,
+          defaultBookingPlayers: ['Pramod Immaneni', 'Conrad Rodricks']
         });
 
         // Court 2 and Court 3 booked, Court 1 available
@@ -5149,13 +5161,13 @@ describe('pollCommands', () => {
         groupsConfig.getGroupConfig = origGetConfig;
       }
     });
-    it('should convert poll with > 12 slots to Yes/No opt-in poll as WhatsApp does not support > 12 options', async () => {
-      let sentPoll = null;
+    it('should split poll with > 12 slots (e.g. 16 spots) into court-based multi-polls', async () => {
+      let sentPolls = [];
       const mockSock = {
         user: { id: 'tenbot@s.whatsapp.net' },
         sendMessage: async (jid, payload) => {
-          sentPoll = payload;
-          return { key: { id: 'poll_16_slots', remoteJid: jid } };
+          sentPolls.push(payload);
+          return { key: { id: `poll_16_slots_${sentPolls.length}`, remoteJid: jid } };
         }
       };
 
@@ -5168,7 +5180,7 @@ describe('pollCommands', () => {
         persistPolls: () => {}
       };
 
-      // Creating a poll for 16 spots (which would otherwise produce 15 or 16 voting slots)
+      // Creating a poll for 16 spots (with creator included -> 1 creator + 15 slots)
       const res = await createMatchPoll(
         mockSock,
         'group1@g.us',
@@ -5197,30 +5209,39 @@ describe('pollCommands', () => {
       );
 
       assert.ok(res, 'Poll result should exist');
-      assert.equal(res.isOptIn, true, 'Should be converted to opt-in poll');
-      assert.deepEqual(res.options, ['Yes', 'No'], 'Options should be Yes and No');
-      assert.deepEqual(res.values, ['Yes', 'No'], 'Values should be Yes and No');
-      assert.equal(res.size, null, 'Opt-in poll size should be null');
-      assert.match(res.pollTitle, /\(Vote Yes\/No\)/, 'Poll title should indicate Vote Yes/No');
+      assert.equal(res.isOptIn, false, 'Should remain a fixed multi-poll, not opt-in');
+      assert.equal(res.isMultiPoll, true, 'Should be marked as multi-poll');
+      assert.equal(res.totalParts, 2, 'Should have 2 parts');
+      assert.deepEqual(res.batches, [12, 4]);
+      assert.equal(res.pollIds.length, 2, 'Should create 2 polls');
+      assert.match(res.pollTitle, /Part 1\/2/);
 
-      assert.ok(sentPoll?.poll, 'Poll message should have been sent');
-      assert.deepEqual(sentPoll.poll.values, ['Yes', 'No'], 'Sent poll options should be Yes and No');
-      assert.match(sentPoll.poll.name, /\(Vote Yes\/No\)/, 'Sent poll title should indicate Vote Yes/No');
+      assert.equal(sentPolls.length, 2, '2 poll messages should have been sent to WhatsApp');
+      // Part 1 has Alice as creator + Player 2 to Player 12 (11 slots)
+      assert.equal(sentPolls[0].poll.values.length, 11);
+      assert.match(sentPolls[0].poll.name, /Part 1\/2: Spots 1–12/);
+      assert.deepEqual(sentPolls[0].poll.values, ['Player 2', 'Player 3', 'Player 4', 'Player 5', 'Player 6', 'Player 7', 'Player 8', 'Player 9', 'Player 10', 'Player 11', 'Player 12']);
 
-      const pollState = activePolls.get('poll_16_slots');
-      assert.ok(pollState, 'Poll state should be stored');
-      assert.equal(pollState.type, 'opt_in', 'Poll state type should be opt_in');
-      assert.deepEqual(pollState.options, ['Yes', 'No']);
-      assert.equal(pollState.size, null);
+      // Part 2 has Player 13 to Player 16 (4 slots)
+      assert.equal(sentPolls[1].poll.values.length, 4);
+      assert.match(sentPolls[1].poll.name, /Part 2\/2: Spots 13–16/);
+      assert.deepEqual(sentPolls[1].poll.values, ['Player 13', 'Player 14', 'Player 15', 'Player 16']);
+
+      const pollState1 = activePolls.get('poll_16_slots_1');
+      const pollState2 = activePolls.get('poll_16_slots_2');
+      assert.ok(pollState1 && pollState2, 'Both poll states should be stored');
+      assert.equal(pollState1.parentPollId, pollState2.parentPollId);
+      assert.deepEqual(pollState1.siblingPollIds, ['poll_16_slots_2']);
+      assert.deepEqual(pollState2.siblingPollIds, ['poll_16_slots_1']);
     });
 
-    it('should convert auto poll with 4 courts (16 slots) to Yes/No opt-in poll', async () => {
-      let sentPoll = null;
+    it('should split auto poll with 4 courts (16 slots) into multi-polls', async () => {
+      let sentPolls = [];
       const mockSock = {
         user: { id: 'tenbot@s.whatsapp.net' },
         sendMessage: async (jid, payload) => {
-          sentPoll = payload;
-          return { key: { id: 'poll_auto_4courts', remoteJid: jid } };
+          sentPolls.push(payload);
+          return { key: { id: `poll_auto_4courts_${sentPolls.length}`, remoteJid: jid } };
         }
       };
 
@@ -5270,12 +5291,13 @@ describe('pollCommands', () => {
       );
 
       assert.ok(res, 'Poll result should exist');
-      assert.equal(res.isOptIn, true, 'Should be converted to opt-in poll');
-      assert.deepEqual(res.options, ['Yes', 'No']);
-      assert.equal(res.size, null);
-      assert.match(res.pollTitle, /\(Vote Yes\/No\)/);
-      assert.ok(sentPoll?.poll);
-      assert.deepEqual(sentPoll.poll.values, ['Yes', 'No']);
+      assert.equal(res.isOptIn, false);
+      assert.equal(res.isMultiPoll, true);
+      assert.equal(res.totalParts, 2);
+      assert.deepEqual(res.batches, [12, 4]);
+      assert.equal(sentPolls.length, 2);
+      assert.equal(sentPolls[0].poll.values.length, 12);
+      assert.equal(sentPolls[1].poll.values.length, 4);
     });
 
     it('dynamically creates an enumerated poll when 3 courts are available and converts to Yes/No poll when 4 courts are available (maxCourts: 4)', async () => {
@@ -5386,10 +5408,11 @@ describe('pollCommands', () => {
           context
         );
 
-        assert.equal(res4.isOptIn, true, '4 courts (16 slots) should convert to a Yes/No opt-in poll');
-        assert.deepEqual(res4.options, ['Yes', 'No']);
-        assert.match(res4.pollTitle, /\(Vote Yes\/No\)/);
-        assert.deepEqual(sentPolls[1].poll.values, ['Yes', 'No']);
+        assert.equal(res4.isOptIn, false, '4 courts (16 slots) should split into multi-polls');
+        assert.equal(res4.isMultiPoll, true);
+        assert.equal(res4.totalParts, 2);
+        assert.deepEqual(sentPolls[1].poll.values.length, 12);
+        assert.deepEqual(sentPolls[2].poll.values.length, 4);
       } finally {
         scvcc.checkCourtAvailability = origCheck;
         scvcc.getCourtBookings = origBookings;
@@ -5847,4 +5870,496 @@ describe('pollCommands', () => {
       });
     });
   });
+
+  describe('court preference override for match polls', () => {
+    it('normalizeCourtPreference parses array, string, and bracket formats', () => {
+      assert.deepEqual(normalizeCourtPreference([2, 3, 1]), ['2', '3', '1']);
+      assert.deepEqual(normalizeCourtPreference('2, 3, 1'), ['2', '3', '1']);
+      assert.deepEqual(normalizeCourtPreference('[2, 3, 1]'), ['2', '3', '1']);
+      assert.deepEqual(normalizeCourtPreference('Court 2, Court 3, Court 1'), ['Court', '2', 'Court', '3', 'Court', '1']);
+      assert.deepEqual(normalizeCourtPreference(null), []);
+    });
+
+    it('sortCourtsByPreference correctly orders court strings and court objects', () => {
+      const courts = ['Court 1', 'Court 3', 'Court 2', 'Court 4'];
+      const pref = [2, 3, 1];
+      const sorted = sortCourtsByPreference(courts, pref);
+      assert.deepEqual(sorted, ['Court 2', 'Court 3', 'Court 1', 'Court 4']);
+
+      const courtObjs = [
+        { court: 'Court 1', time: '7pm' },
+        { court: 'Court 3', time: '7pm' },
+        { court: 'Court 2', time: '7pm' }
+      ];
+      const sortedObjs = sortCourtsByPreference(courtObjs, ['3', '1', '2']);
+      assert.deepEqual(sortedObjs.map(c => c.court), ['Court 3', 'Court 1', 'Court 2']);
+    });
+
+    it('parsePollCreationText parses --court-preference and --booking-court-preference', () => {
+      const p1 = parsePollCreationText('!poll 8 tomorrow 7pm --court-preference="2, 3, 1"');
+      assert.ok(p1);
+      assert.deepEqual(p1.bookingCourtPreference, ['2', '3', '1']);
+
+      const p2 = parsePollCreationText('!poll 8 tomorrow 7pm --booking-court-preference="3, 1"' );
+      assert.ok(p2);
+      assert.deepEqual(p2.bookingCourtPreference, ['3', '1']);
+    });
+
+    it('preBookCourtsForMatch forwards poll courtPreference to scvcc.bookCourt and overrides group default', async () => {
+      const origBook = scvcc.bookCourt;
+      let capturedBookArgs = null;
+      scvcc.bookCourt = async (args) => {
+        capturedBookArgs = args;
+        return {
+          success: true,
+          court: 'Court 3',
+          players: args.players,
+          date: args.date,
+          time: args.time
+        };
+      };
+
+      try {
+        const res = await preBookCourtsForMatch({
+          sock: null,
+          remoteJid: 'group_pref@g.us',
+          targetDateMDY: '11/20/2026',
+          queryTime: '7:00 PM',
+          size: 4,
+          isAuto: false,
+          preBookCourts: 1,
+          courtPreference: ['3', '1', '2'],
+          bookingPlayers: [['Player A', 'Player B', 'Player C', 'Player D']]
+        });
+
+        assert.ok(capturedBookArgs, 'scvcc.bookCourt should have been called');
+        assert.deepEqual(capturedBookArgs.courtPreference, ['3', '1', '2'], 'Should forward poll courtPreference to scvcc.bookCourt');
+        assert.equal(res.prebookedCourts.length, 1);
+        assert.equal(res.prebookedCourts[0].court, 'Court 3');
+      } finally {
+        scvcc.bookCourt = origBook;
+      }
+    });
+
+    it('createMatchPoll selects candidate courts in order of poll courtPreference override', async () => {
+      const origCheck = scvcc.checkCourtAvailability;
+      const origBookings = scvcc.getCourtBookings;
+      const origGetConfig = groupsConfig.getGroupConfig;
+
+      try {
+        // Group default preference is [1, 2, 3]
+        groupsConfig.getGroupConfig = () => ({
+          name: 'Test Group',
+          sport: 'tennis',
+          courtBookingEnabled: true,
+          bookingCourtPreference: [1, 2, 3]
+        });
+
+        // Courts 1, 2, 3 are all available
+        scvcc.checkCourtAvailability = async () => ({
+          slots: [{
+            time: '7:00 PM',
+            courts: [
+              { court: 'Court 1', status: 'available', availableMinutes: 90 },
+              { court: 'Court 2', status: 'available', availableMinutes: 90 },
+              { court: 'Court 3', status: 'available', availableMinutes: 90 }
+            ]
+          }]
+        });
+
+        scvcc.getCourtBookings = async () => ({ bookings: [] });
+
+        let sentPoll = null;
+        const mockSock = {
+          sendMessage: async (jid, content) => {
+            if (content.poll) sentPoll = content.poll;
+            return { key: { id: 'poll_pref_test', remoteJid: jid }, message: content };
+          }
+        };
+
+        const activePolls = new Map();
+        const context = { activePolls, recurringPolls: new Map(), messageStore: new Map(), latestPollIdByChat: new Map(), persistPolls: () => {} };
+
+        // Poll overrides court preference to [3, 2, 1] with maxCourts: 1
+        const res = await createMatchPoll(
+          mockSock,
+          'group_pref_override@g.us',
+          'auto',
+          'Tomorrow 7pm',
+          null,
+          null,
+          'Alice',
+          'alice@s.whatsapp.net',
+          false,
+          null,
+          false,
+          false,
+          false,
+          true, // checkCourts
+          false,
+          false,
+          null,
+          null,
+          'none',
+          null,
+          null,
+          null,
+          null,
+          context,
+          {
+            maxCourts: 1,
+            bookingCourtPreference: ['3', '2', '1']
+          }
+        );
+
+        assert.ok(res, 'Poll should be created');
+        assert.deepEqual(res.bookingCourtPreference, ['3', '2', '1'], 'res should include poll courtPreference');
+        const pollState = activePolls.get(res.pollId);
+        assert.ok(pollState);
+        assert.deepEqual(pollState.bookingCourtPreference, ['3', '2', '1'], 'pollState should store poll courtPreference');
+        // Because maxCourts is 1 and preference is [3, 2, 1], Court 3 should be selected as the unbooked court!
+        assert.equal(pollState.unbookedCourts.length, 1);
+        assert.equal(pollState.unbookedCourts[0].court, 'Court 3', 'Court 3 should be chosen based on preference override');
+      } finally {
+        scvcc.checkCourtAvailability = origCheck;
+        scvcc.getCourtBookings = origBookings;
+        groupsConfig.getGroupConfig = origGetConfig;
+      }
+    });
+
+    it('handleOnDemandCourtBooking sorts unbooked courts by poll bookingCourtPreference before booking', async () => {
+      const origBook = scvcc.bookCourt;
+      let attemptedCourt = null;
+      let passedPreference = null;
+
+      scvcc.bookCourt = async (args) => {
+        attemptedCourt = args.court;
+        passedPreference = args.courtPreference;
+        return {
+          success: true,
+          court: args.court,
+          players: args.players,
+          date: args.date,
+          time: args.time
+        };
+      };
+
+      try {
+        const mockSock = {
+          sendMessage: async () => ({ key: { id: 'msg_1' } })
+        };
+        const pollState = {
+          remoteJid: 'group_ondemand_pref@g.us',
+          name: 'Match Poll',
+          when: 'tomorrow 7pm',
+          targetDateMDY: '11/20/2026',
+          queryTime: '7:00 PM',
+          courtBookingType: 'doubles',
+          size: 8,
+          slotLimit: 8,
+          bookingCourtPreference: ['2', '1'],
+          unbookedCourts: [
+            { court: 'Court 1', time: '7:00 PM' },
+            { court: 'Court 2', time: '7:00 PM' }
+          ],
+          prebookedCourts: [],
+          advanceBookedCourts: [],
+          onDemandBookingInProgress: false,
+          _bookingActive: false,
+          creator: { name: 'Alice', jid: 'alice@s.whatsapp.net' }
+        };
+
+        const aggregated = [
+          { name: 'Player 1', voters: ['p1@s.whatsapp.net'] },
+          { name: 'Player 2', voters: ['p2@s.whatsapp.net'] },
+          { name: 'Player 3', voters: ['p3@s.whatsapp.net'] },
+          { name: 'Player 4', voters: ['p4@s.whatsapp.net'] },
+          { name: 'Player 5', voters: ['p5@s.whatsapp.net'] },
+          { name: 'Player 6', voters: ['p6@s.whatsapp.net'] }
+        ];
+
+        await handleOnDemandCourtBooking(mockSock, 'poll_pref_ondemand', pollState, aggregated, {});
+
+        assert.equal(attemptedCourt, 'Court 2', 'Should attempt preferred Court 2 before Court 1');
+        assert.deepEqual(passedPreference, ['2', '1']);
+      } finally {
+        scvcc.bookCourt = origBook;
+      }
+    });
+  });
+
 });
+
+  describe('multi-poll support for > 12 player slots', () => {
+    it('partitionMatchSlots correctly partitions doubles and singles into whole-court batches <= 12', () => {
+      // Doubles (4 spots/court)
+      assert.deepEqual(partitionMatchSlots(4, 4), [4]);
+      assert.deepEqual(partitionMatchSlots(8, 4), [8]);
+      assert.deepEqual(partitionMatchSlots(12, 4), [12]);
+      assert.deepEqual(partitionMatchSlots(16, 4), [12, 4]);
+      assert.deepEqual(partitionMatchSlots(20, 4), [12, 8]);
+      assert.deepEqual(partitionMatchSlots(24, 4), [12, 12]);
+      assert.deepEqual(partitionMatchSlots(28, 4), [12, 12, 4]);
+      assert.deepEqual(partitionMatchSlots(32, 4), [12, 12, 8]);
+      assert.deepEqual(partitionMatchSlots(36, 4), [12, 12, 12]);
+
+      // Singles (2 spots/court)
+      assert.deepEqual(partitionMatchSlots(4, 2), [4]);
+      assert.deepEqual(partitionMatchSlots(8, 2), [8]);
+      assert.deepEqual(partitionMatchSlots(12, 2), [12]);
+      assert.deepEqual(partitionMatchSlots(16, 2), [12, 4]);
+      assert.deepEqual(partitionMatchSlots(20, 2), [12, 8]);
+      assert.deepEqual(partitionMatchSlots(24, 2), [12, 12]);
+      assert.deepEqual(partitionMatchSlots(28, 2), [12, 12, 4]);
+    });
+
+    it('creates 2 linked polls upfront for 24 spots (6 courts: 12 + 12)', async () => {
+      let sentPolls = [];
+      const mockSock = {
+        user: { id: 'tenbot@s.whatsapp.net' },
+        sendMessage: async (jid, payload) => {
+          sentPolls.push(payload);
+          return { key: { id: `poll_24_${sentPolls.length}`, remoteJid: jid } };
+        }
+      };
+
+      const activePolls = new Map();
+      const messageStore = new Map();
+      const context = {
+        activePolls,
+        messageStore,
+        latestPollIdByChat: new Map(),
+        persistPolls: () => {}
+      };
+
+      const res = await createMatchPoll(
+        mockSock,
+        'group24@g.us',
+        24,
+        'tomorrow 9am',
+        'tomorrow',
+        '9am',
+        'Organizer',
+        'org@s.whatsapp.net',
+        false,
+        null,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        context
+      );
+
+      assert.ok(res);
+      assert.equal(res.isMultiPoll, true);
+      assert.equal(res.totalParts, 2);
+      assert.deepEqual(res.batches, [12, 12]);
+      assert.equal(sentPolls.length, 2);
+      assert.equal(sentPolls[0].poll.values.length, 12);
+      assert.equal(sentPolls[1].poll.values.length, 12);
+      assert.match(sentPolls[0].poll.name, /Part 1\/2: Spots 1–12/);
+      assert.match(sentPolls[1].poll.name, /Part 2\/2: Spots 13–24/);
+    });
+
+    it('handles demand-driven spillover: 28 spots creates 2 upfront, opens Part 3 when filled, and auto-generates combined matchups', async () => {
+      let sentMessages = [];
+      const mockSock = {
+        user: { id: 'tenbot@s.whatsapp.net' },
+        sendMessage: async (jid, payload) => {
+          sentMessages.push(payload);
+          return {
+            key: { id: payload.poll ? `poll_part_${sentMessages.length}` : `msg_${sentMessages.length}`, remoteJid: jid },
+            message: payload.poll ? { pollCreationMessage: { name: payload.poll.name, options: payload.poll.values.map((v) => ({ optionName: v })) } } : {}
+          };
+        }
+      };
+
+      const activePolls = new Map();
+      const messageStore = new Map();
+      const context = {
+        activePolls,
+        messageStore,
+        latestPollIdByChat: new Map(),
+        persistPolls: () => {}
+      };
+
+      // 28 spots = [12, 12, 4]. Default maxInitialPolls is 2, so Part 1 and Part 2 are created upfront.
+      const res = await createMatchPoll(
+        mockSock,
+        'group28@g.us',
+        28,
+        'tomorrow 8am',
+        'tomorrow',
+        '8am',
+        'Organizer',
+        'org@s.whatsapp.net',
+        false,
+        null,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        context
+      );
+
+      assert.equal(res.totalParts, 3);
+      assert.deepEqual(res.batches, [12, 12, 4]);
+      // Initially, exactly 2 polls are created upfront
+      const initialPolls = sentMessages.filter((m) => m.poll);
+      assert.equal(initialPolls.length, 2);
+      assert.equal(initialPolls[0].poll.values.length, 12);
+      assert.equal(initialPolls[1].poll.values.length, 12);
+
+      const poll1Id = res.pollIds[0];
+      const poll2Id = res.pollIds[1];
+      const p1 = activePolls.get(poll1Id);
+      const p2 = activePolls.get(poll2Id);
+      assert.ok(p1 && p2);
+      assert.equal(p1.parentPollId, p2.parentPollId);
+
+      const crypto = require('crypto');
+      const makeOptHash = (n) => crypto.createHash('sha256').update(n).digest();
+
+      // Simulate duplicate vote across Part 1 and Part 2
+      const voter1 = '14085550001@s.whatsapp.net';
+      p1.voteBuffer.set(voter1, { pollUpdateMessageKey: { participant: voter1 }, vote: { selectedOptions: [makeOptHash('Player 1')] } });
+      const dupUpdates = [{ pollUpdateMessageKey: { participant: voter1 }, vote: { selectedOptions: [makeOptHash('Player 13')] } }];
+      messageStore.set(`group28@g.us:${poll2Id}`, { pollCreationMessage: { name: p2.name, options: p2.options.map((o) => ({ optionName: o })) } });
+      await processPollVoteEvent(mockSock, { id: poll2Id, remoteJid: 'group28@g.us' }, dupUpdates, context);
+
+      const dupWarning = sentMessages.find((m) => m.text && m.text.includes('Duplicate Vote Notice'));
+      assert.ok(dupWarning, 'Should have notified about duplicate vote');
+      assert.match(dupWarning.text, /voted in both Part 1 and Part 2/);
+
+      // Fill Part 1 (12 voters)
+      p1.voteBuffer.clear();
+      for (let i = 1; i <= 12; i++) {
+        const jid = `140855500${String(i).padStart(2, '0')}@s.whatsapp.net`;
+        p1.voteBuffer.set(jid, { pollUpdateMessageKey: { participant: jid }, vote: { selectedOptions: [makeOptHash(`Player ${i}`)] } });
+      }
+      p1.status = 'filled';
+      p1.lastPlayers = Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`);
+
+      // Fill Part 2 (12 voters)
+      p2.voteBuffer.clear();
+      for (let i = 13; i <= 24; i++) {
+        const jid = `140855500${String(i).padStart(2, '0')}@s.whatsapp.net`;
+        p2.voteBuffer.set(jid, { pollUpdateMessageKey: { participant: jid }, vote: { selectedOptions: [makeOptHash(`Player ${i}`)] } });
+      }
+
+      // Trigger vote event on Part 2 with 12th voter -> fills Part 2 and triggers spillover!
+      messageStore.set(`group28@g.us:${poll2Id}`, { pollCreationMessage: { name: p2.name, options: p2.options.map((o) => ({ optionName: o })) } });
+      await processPollVoteEvent(mockSock, { id: poll2Id, remoteJid: 'group28@g.us' }, [], context);
+
+      // Verify spillover poll (Part 3) was created!
+      const pollsNow = sentMessages.filter((m) => m.poll);
+      assert.equal(pollsNow.length, 3, 'Spillover should have created Part 3 poll');
+      assert.match(pollsNow[2].poll.name, /Part 3\/3: Spots 25–28/);
+      assert.deepEqual(pollsNow[2].poll.values, ['Player 25', 'Player 26', 'Player 27', 'Player 28']);
+
+      const spilloverAnnouncement = sentMessages.find((m) => m.text && m.text.includes('All spots across Part 1 & Part 2 are filled'));
+      assert.ok(spilloverAnnouncement, 'Should announce spillover opening');
+
+      // Now fill Part 3
+      const poll3Id = [...activePolls.keys()].find((id) => id !== poll1Id && id !== poll2Id);
+      const p3 = activePolls.get(poll3Id);
+      assert.ok(p3);
+      for (let i = 25; i <= 28; i++) {
+        const jid = `140855500${String(i).padStart(2, '0')}@s.whatsapp.net`;
+        p3.voteBuffer.set(jid, { pollUpdateMessageKey: { participant: jid }, vote: { selectedOptions: [makeOptHash(`Player ${i}`)] } });
+      }
+
+      // Process vote event on Part 3 -> triggers combined matchups across all 7 courts!
+      messageStore.set(`group28@g.us:${poll3Id}`, { pollCreationMessage: { name: p3.name, options: p3.options.map((o) => ({ optionName: o })) } });
+      await processPollVoteEvent(mockSock, { id: poll3Id, remoteJid: 'group28@g.us' }, [], context);
+
+      // Verify all 3 polls are marked resolved
+      assert.equal(p1.status, 'resolved');
+      assert.equal(p2.status, 'resolved');
+      assert.equal(p3.status, 'resolved');
+
+      // Verify combined matchups message was sent
+      const matchupsMsg = sentMessages.find((m) => m.text && (m.text.includes('Court 1') || m.text.includes('vs')));
+      assert.ok(matchupsMsg, 'Combined matchups should have been posted');
+    });
+
+    it('cancelling one poll in a multi-poll session deletes all sibling polls', async () => {
+      let deletedIds = [];
+      const mockSock = {
+        user: { id: 'tenbot@s.whatsapp.net' },
+        sendMessage: async (jid, payload) => {
+          if (payload.delete) {
+            deletedIds.push(payload.delete.id);
+          }
+          return { key: { id: payload.poll ? `poll_del_${deletedIds.length}` : 'msg_del', remoteJid: jid } };
+        }
+      };
+
+      const activePolls = new Map();
+      const messageStore = new Map();
+      const context = {
+        activePolls,
+        messageStore,
+        latestPollIdByChat: new Map(),
+        persistPolls: () => {}
+      };
+
+      const res = await createMatchPoll(
+        mockSock,
+        'group_cancel@g.us',
+        16,
+        'Friday 6pm',
+        'Friday',
+        '6pm',
+        'Creator',
+        'creator@s.whatsapp.net',
+        false,
+        null,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        context
+      );
+
+      const [p1Id, p2Id] = res.pollIds;
+      assert.equal(activePolls.has(p1Id), true);
+      assert.equal(activePolls.has(p2Id), true);
+
+      // Cancel Part 1
+      await cancelOrDeletePoll(mockSock, 'group_cancel@g.us', p1Id, context);
+
+      // Both Part 1 and Part 2 should be deleted from activePolls and deleted from WhatsApp
+      assert.equal(activePolls.has(p1Id), false);
+      assert.equal(activePolls.has(p2Id), false);
+      assert.ok(deletedIds.includes(p1Id), 'Part 1 should be deleted from WhatsApp');
+      assert.ok(deletedIds.includes(p2Id), 'Part 2 should be deleted from WhatsApp');
+    });
+  });

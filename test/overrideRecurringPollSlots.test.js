@@ -117,7 +117,7 @@ describe('overrideRecurringPollSlots', () => {
       assert.equal(sched.instanceSlotOverrides['2026-11-13'], 8);
 
       // Verify card formatting includes the override
-      const card = recurringPollsModule.formatRecurringScheduleCard(sched);
+      const card = recurringPollsModule.formatRecurringScheduleCard(sched, null, 1, { year: 2026, month: 10, day: 9, hour: 10, minute: 0 });
       assert.match(card, /Slot Override\(s\):.*2026-11-13 → 8 slots/);
     });
 
@@ -571,7 +571,8 @@ describe('overrideRecurringPollSlots', () => {
 
       assert.match(res, /Future Instance Slot Override Set/i);
       assert.match(res, /8 slots/);
-      assert.equal(sched.instanceSlotOverrides['2026-11-13'], 8);
+      const targetFriday = recurringPollsModule.getNextInstanceDate(sched, null, 'Friday')?.dateKey;
+      assert.equal(sched.instanceSlotOverrides[targetFriday], 8);
     });
 
     it('should delegate !setslots to instance slot override when target is recurring schedule with future day', async () => {
@@ -607,7 +608,8 @@ describe('overrideRecurringPollSlots', () => {
 
       assert.match(res, /Future Instance Slot Override Set/i);
       assert.match(res, /8 slots/);
-      assert.equal(sched.instanceSlotOverrides['2026-11-13'], 8);
+      const targetFriday = recurringPollsModule.getNextInstanceDate(sched, null, 'Friday')?.dateKey;
+      assert.equal(sched.instanceSlotOverrides[targetFriday], 8);
     });
 
     it('should delegate !setslots with only day when 1 recurring schedule exists in chat', async () => {
@@ -642,7 +644,8 @@ describe('overrideRecurringPollSlots', () => {
 
       assert.match(res, /Future Instance Slot Override Set/i);
       assert.match(res, /8 slots/);
-      assert.equal(sched.instanceSlotOverrides['2026-11-13'], 8);
+      const targetFriday = recurringPollsModule.getNextInstanceDate(sched, null, 'Friday')?.dateKey;
+      assert.equal(sched.instanceSlotOverrides[targetFriday], 8);
     });
 
     it('should delegate !setslots to reset future instance slot override', async () => {
@@ -655,10 +658,11 @@ describe('overrideRecurringPollSlots', () => {
         days: 'friday',
         daysList: [5],
         size: 'auto',
-        instanceSlotOverrides: { '2026-11-13': 8 },
         enabled: true,
         creator: { name: 'Alice', jid: 'alice@s.whatsapp.net' }
       };
+      const targetFriday = recurringPollsModule.getNextInstanceDate(sched, null, 'Friday')?.dateKey;
+      sched.instanceSlotOverrides = { [targetFriday]: 8 };
       const recurringPolls = new Map([[schedId, sched]]);
       const context = {
         recurringPolls,
@@ -713,7 +717,8 @@ describe('overrideRecurringPollSlots', () => {
 
       assert.match(res, /Future Instance Slot Override Set/i);
       assert.match(res, /12 slots/);
-      assert.equal(sched.instanceSlotOverrides['2026-11-13'], 12);
+      const targetFriday = recurringPollsModule.getNextInstanceDate(sched, null, 'Friday')?.dateKey;
+      assert.equal(sched.instanceSlotOverrides[targetFriday], 12);
     });
 
     it('should delegate !modifyinstance with reset to clear instance slot override', async () => {
@@ -726,10 +731,11 @@ describe('overrideRecurringPollSlots', () => {
         days: 'friday',
         daysList: [5],
         size: 'auto',
-        instanceSlotOverrides: { '2026-11-13': 12 },
         enabled: true,
         creator: { name: 'Alice', jid: 'alice@s.whatsapp.net' }
       };
+      const targetFriday = recurringPollsModule.getNextInstanceDate(sched, null, 'Friday')?.dateKey;
+      sched.instanceSlotOverrides = { [targetFriday]: 12 };
       const recurringPolls = new Map([[schedId, sched]]);
       const context = {
         recurringPolls,
@@ -889,7 +895,7 @@ describe('overrideRecurringPollSlots', () => {
         assert.deepEqual(sched.instanceCourtSkips["2026-11-13"], ["Court 3"]);
 
         // Format card check
-        const card = recurringPollsModule.formatRecurringScheduleCard(sched, "120363402559062529@g.us");
+        const card = recurringPollsModule.formatRecurringScheduleCard(sched, null, 1, { year: 2026, month: 10, day: 10, hour: 12, minute: 0, weekday: "tue" });
         assert.match(card, /Skipped Court\(s\):/i);
         assert.match(card, /Skip Court 3/);
       });
@@ -1035,7 +1041,8 @@ describe('overrideRecurringPollSlots', () => {
 
         assert.match(res, /Future Instance Court Skip Set/i);
         assert.match(res, /Court 3/);
-        assert.deepEqual(sched.instanceCourtSkips["2026-11-13"], ["Court 3"]);
+        const targetFriday = recurringPollsModule.getNextInstanceDate(sched, null, 'Friday')?.dateKey;
+        assert.deepEqual(sched.instanceCourtSkips[targetFriday], ["Court 3"]);
       });
 
       it("should handle !recurringpoll skipcourt Friday 3 and unskipcourt Friday 3", async () => {
@@ -1067,7 +1074,8 @@ describe('overrideRecurringPollSlots', () => {
           context
         );
         assert.match(resSkip, /Future Instance Court Skip Set/i);
-        assert.deepEqual(sched.instanceCourtSkips["2026-11-13"], ["Court 3"]);
+        const targetFriday = recurringPollsModule.getNextInstanceDate(sched, null, 'Friday')?.dateKey;
+        assert.deepEqual(sched.instanceCourtSkips[targetFriday], ["Court 3"]);
 
         const resUnskip = await recurringCommands.handleRecurringCommand(
           mockSock,

@@ -10,6 +10,12 @@
       "Club Event",
       "/^Team Practice/i",
       "/Junior.*Clinic/i"
+    ],
+    "maxInitialPolls": 2,
+    "bookingCourtPreference": [
+      2,
+      3,
+      1
     ]
   },
   "groups": {
@@ -34,10 +40,13 @@
         "xxxxxxxx@lid"
       ],
       "bookingCourtPreference": [
-        2, 3, 1
+        2,
+        3,
+        1
       ],
       "bookingStrategy": "advanced",
-      "bookingSchedule": "-7days 7:00AM"
+      "bookingSchedule": "-7days 7:00AM",
+      "maxInitialPolls": 2
     }
   }
 }
