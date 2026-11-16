@@ -1218,6 +1218,50 @@ describe('recurringPolls', () => {
     });
   });
 
+  describe("recurring poll slot check display", () => {
+    it("should display Slot Check: Enabled by default in recurring schedule card", async () => {
+      const recurringPolls = new Map();
+      await recurringPollsModule.scheduleRecurringPoll({
+        recurringPolls,
+        persistPolls: () => {},
+        targetChatId: "120363402559062529@g.us",
+        sender: "Alice",
+        senderJid: "alice@s.whatsapp.net",
+        params: {
+          size: 4,
+          matchTime: "7pm",
+          days: "mon-thu"
+        }
+      });
+      const sched = [...recurringPolls.values()][0];
+      const card = recurringPollsModule.formatRecurringScheduleCard(sched);
+      assert.ok(card.includes("• *Slot Check:* Enabled"), "Card should show Slot Check: Enabled by default");
+
+      const listOutput = recurringPollsModule.listRecurringPolls({ recurringPolls, chatId: "120363402559062529@g.us" });
+      assert.ok(listOutput.includes("• *Slot Check:* Enabled"), "List output should show Slot Check: Enabled");
+    });
+
+    it("should display Slot Check: Disabled when slotCheck is set to false", async () => {
+      const recurringPolls = new Map();
+      await recurringPollsModule.scheduleRecurringPoll({
+        recurringPolls,
+        persistPolls: () => {},
+        targetChatId: "120363402559062529@g.us",
+        sender: "Alice",
+        senderJid: "alice@s.whatsapp.net",
+        params: {
+          size: 4,
+          matchTime: "7pm",
+          days: "mon-thu",
+          slotCheck: false
+        }
+      });
+      const sched = [...recurringPolls.values()][0];
+      const card = recurringPollsModule.formatRecurringScheduleCard(sched);
+      assert.ok(card.includes("• *Slot Check:* Disabled"), "Card should show Slot Check: Disabled");
+    });
+  });
+
   describe('recurring poll lineup generation synchronization', () => {
     it('should correctly set lineupGeneration none and remove legacy flags when scheduling', async () => {
       const recurringPolls = new Map();

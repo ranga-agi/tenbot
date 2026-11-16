@@ -3,7 +3,6 @@
     "sport": "tennis",
     "courtBookingEnabled": true,
     "autoMatchups": true,
-    "preBookCourts": 1,
     "inactivityPeriod": 12,
     "tentativeBookingTitles": [
       "Clinic",
@@ -32,7 +31,6 @@
         "Player 3",
         "Player 4"
       ],
-      "preBookCourts": 1,
       "directCourtBookingAccounts": [
         "Player 1"
       ],

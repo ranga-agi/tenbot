@@ -3276,7 +3276,7 @@ describe('pollCommands', () => {
       assert.equal(stored.slotCheck, true);
     });
 
-    it("should default slotCheck to false for automatic opt-in polls", async () => {
+    it("should default slotCheck to true when not specified (even for opt-in polls)", async () => {
       const mockSock = {
         sendMessage: async (jid, content) => ({ key: { id: "poll_slotcheck_optin", remoteJid: jid }, message: content })
       };
@@ -3306,9 +3306,67 @@ describe('pollCommands', () => {
         null,
         { activePolls, messageStore: new Map(), latestPollIdByChat: new Map(), persistPolls: () => {} }
       );
-      assert.equal(res.slotCheck, false);
+      assert.equal(res.slotCheck, true);
       const stored = activePolls.get("poll_slotcheck_optin");
+      assert.equal(stored.slotCheck, true);
+    });
+
+    it("should respect explicit slotCheck=false when specified on a poll", async () => {
+      const mockSock = {
+        sendMessage: async (jid, content) => ({ key: { id: "poll_slotcheck_false", remoteJid: jid }, message: content })
+      };
+      const activePolls = new Map();
+      const res = await createMatchPoll(
+        mockSock,
+        "group1@g.us",
+        4,
+        "Tomorrow 7pm",
+        null,
+        "7pm",
+        "Alice",
+        "alice@s.whatsapp.net",
+        false,
+        null,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        { activePolls, messageStore: new Map(), latestPollIdByChat: new Map(), persistPolls: () => {} },
+        { slotCheck: false }
+      );
+      assert.equal(res.slotCheck, false);
+      const stored = activePolls.get("poll_slotcheck_false");
       assert.equal(stored.slotCheck, false);
+    });
+
+    it("should default slotCheck to false for manually created polls when slotCheck is unspecified", async () => {
+      const pollState = {
+        name: "User Created Poll",
+        isManual: true,
+        // slotCheck is undefined!
+        type: "manual",
+        options: ["Option A", "Option B"],
+        remoteJid: "group1@g.us",
+        voteBuffer: new Map()
+      };
+      const aggregated = [
+        { name: "Option A", voters: ["user1@s.whatsapp.net", "user2@s.whatsapp.net"] }
+      ];
+      let warningSent = false;
+      const mockSock = {
+        sendMessage: async () => { warningSent = true; }
+      };
+      const res = await checkAndNotifySlotConflicts(mockSock, "p_manual", pollState, aggregated, {});
+      assert.equal(res, false);
+      assert.equal(warningSent, false, "Must not complain when slotCheck is unspecified on manual poll");
     });
 
     it("should not complain about multiple votes on the same slot when slotCheck is false", async () => {
@@ -6957,6 +7015,79 @@ describe('pollCommands', () => {
       assert.equal(res.size, 8, "Poll size should remain 8 when checkCourts=false");
       assert.equal(sentPoll.values.length, 8, "Values should have 8 slots");
     });
+    it("should default pre-booked courts to size court count (e.g. size 12 -> 3 courts) instead of group default preBookCourts: 1", async () => {
+      groupsConfig.getGroupConfig = () => ({
+        sport: "tennis",
+        courtBookingEnabled: true,
+        preBookCourts: 1,
+        directCourtBookingAccounts: ["Pramod Immaneni", "Conrad Rodricks", "Kejal Patel"],
+        defaultBookingPlayers: ["Alice", "Bob", "Charlie", "Dave", "Eve", "Frank"]
+      });
+
+      let bookedAttempts = [];
+      const origBookCourt = scvcc.bookCourt;
+      const origCheckAvail = scvcc.checkCourtAvailability;
+      const origGetBookings = scvcc.getCourtBookings;
+
+      try {
+        scvcc.checkCourtAvailability = async () => ({
+          slots: [{
+            time: "7:00 PM",
+            courts: [
+              { court: "Court 2", status: "available", availableMinutes: 90 },
+              { court: "Court 3", status: "available", availableMinutes: 90 },
+              { court: "Court 1", status: "available", availableMinutes: 90 }
+            ]
+          }]
+        });
+        scvcc.getCourtBookings = async () => ({ bookings: [] });
+        scvcc.bookCourt = async (params) => {
+          bookedAttempts.push(params);
+          return { success: true, reservationId: `res_${bookedAttempts.length}`, court: params.court };
+        };
+
+        const res = await preBookCourtsForMatch({
+          sock: {},
+          remoteJid: "120363403838804497@g.us",
+          targetDateMDY: "11/20/2026",
+          queryTime: "7:00 PM",
+          size: 12,
+          isAuto: false,
+          preBookCourts: null // Not specified on command
+        });
+
+        assert.equal(bookedAttempts.length, 3, "Should attempt to book 3 courts to accommodate size 12");
+        assert.equal(res.advanceBookedCourts.length, 3, "Should successfully book 3 courts");
+      } finally {
+        scvcc.bookCourt = origBookCourt;
+        scvcc.checkCourtAvailability = origCheckAvail;
+        scvcc.getCourtBookings = origGetBookings;
+      }
+    });
+
+    it("should default recurring schedule preBookCourts to size court count (e.g. size 8 -> 2 courts) instead of group default preBookCourts: 1", async () => {
+      groupsConfig.getGroupConfig = () => ({
+        sport: "tennis",
+        courtBookingEnabled: true,
+        preBookCourts: 1
+      });
+
+      const recurringPolls = new Map();
+      const parsed = recurringPollsModule.parseRecurringPollText("!recurringpoll 8 7pm mon-thu --courts-strategy=book");
+      await recurringPollsModule.scheduleRecurringPoll({
+        recurringPolls,
+        persistPolls: () => {},
+        targetChatId: "120363403838804497@g.us",
+        sender: "Pramod",
+        senderJid: "pramod@lid",
+        params: parsed
+      });
+
+      const sched = [...recurringPolls.values()][0];
+      assert.equal(sched.size, 8);
+      assert.equal(sched.preBookCourts, 2, "Schedule preBookCourts should default to 2 (from size 8) rather than group default 1");
+    });
+
     it("should scale down multi-time slot size from 8 to 4 when only 1 court is found", async () => {
       scvcc.checkCourtAvailability = async () => ({
         slots: [{ courts: [] }]
@@ -7020,5 +7151,86 @@ describe('pollCommands', () => {
         "No / Can't play"
       ]);
     });
+
+    it("should not pre-book any courts for an opt-in poll when preBookCourts is not specified", async () => {
+      groupsConfig.getGroupConfig = () => ({
+        sport: "tennis",
+        courtBookingEnabled: true,
+        directCourtBookingAccounts: ["Pramod Immaneni"],
+        defaultBookingPlayers: ["Alice", "Bob", "Charlie"]
+      });
+
+      let bookedAttempts = [];
+      const origBookCourt = scvcc.bookCourt;
+      try {
+        scvcc.bookCourt = async (params) => {
+          bookedAttempts.push(params);
+          return { success: true, reservationId: "res_1", court: params.court };
+        };
+
+        const res = await preBookCourtsForMatch({
+          sock: {},
+          remoteJid: "120363403838804497@g.us",
+          targetDateMDY: "11/20/2026",
+          queryTime: "7:00 PM",
+          size: null, // Opt-in poll
+          isAuto: false,
+          preBookCourts: null
+        });
+
+        assert.equal(bookedAttempts.length, 0, "Should not attempt to book any courts for opt-in poll without explicit preBookCourts");
+        assert.equal(res.advanceBookedCourts.length, 0);
+        assert.equal(res.prebookedCourts.length, 0);
+      } finally {
+        scvcc.bookCourt = origBookCourt;
+      }
+    });
+
+    it("should pre-book courts for an opt-in poll when preBookCourts is explicitly specified", async () => {
+      groupsConfig.getGroupConfig = () => ({
+        sport: "tennis",
+        courtBookingEnabled: true,
+        directCourtBookingAccounts: ["Pramod Immaneni"],
+        defaultBookingPlayers: ["Alice", "Bob", "Charlie"]
+      });
+
+      let bookedAttempts = [];
+      const origBookCourt = scvcc.bookCourt;
+      const origCheckAvail = scvcc.checkCourtAvailability;
+      const origGetBookings = scvcc.getCourtBookings;
+      try {
+        scvcc.checkCourtAvailability = async () => ({
+          slots: [{
+            time: "7:00 PM",
+            courts: [
+              { court: "Court 1", status: "available", availableMinutes: 90 }
+            ]
+          }]
+        });
+        scvcc.getCourtBookings = async () => ({ bookings: [] });
+        scvcc.bookCourt = async (params) => {
+          bookedAttempts.push(params);
+          return { success: true, reservationId: "res_1", court: params.court };
+        };
+
+        const res = await preBookCourtsForMatch({
+          sock: {},
+          remoteJid: "120363403838804497@g.us",
+          targetDateMDY: "11/20/2026",
+          queryTime: "7:00 PM",
+          size: null, // Opt-in poll
+          isAuto: false,
+          preBookCourts: 1 // Explicitly specified
+        });
+
+        assert.equal(bookedAttempts.length, 1, "Should book 1 court when explicit preBookCourts=1 is passed");
+        assert.equal(res.advanceBookedCourts.length, 1);
+      } finally {
+        scvcc.bookCourt = origBookCourt;
+        scvcc.checkCourtAvailability = origCheckAvail;
+        scvcc.getCourtBookings = origGetBookings;
+      }
+    });
+
   });
 });
