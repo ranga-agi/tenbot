@@ -27,7 +27,7 @@ describe('help', () => {
     assert.match(text, /Create Match Poll \(!poll\)/);
     assert.match(text, /Usage:/);
     assert.match(text, /Options:/);
-    assert.match(text, /`--courts` \/ `--check-courts` \/ `--no-courts`/);
+    assert.match(text, /`--courts-strategy=book\|lookup\|none`/);
     assert.equal(text.includes('`--no-matchups`'), false);
     assert.match(text, /`--single-vote` \/ `--multi-vote`/);
     assert.match(text, /`--single-session` \/ `--independent-sessions`/);
@@ -36,7 +36,7 @@ describe('help', () => {
     assert.match(text, /`--slot-check` \/ `--no-slot-check` — Enable or disable slot conflict checking/);
     assert.match(text, /`--pre-allocate-slots` — Include pre-allocated court slots/);
     assert.match(text, /`--reminders` \/ `--no-reminders`/);
-    assert.match(text, /`--court-booking-type=pre-book\|none` \(or `--court-booking=pre-book\|none`\) — Automatically pre-book courts/);
+    assert.equal(text.includes('`--court-booking-type`'), false);
     assert.match(text, /`--look-around="<window>"` — Time window to search/);
     assert.match(text, /Examples:/);
   });

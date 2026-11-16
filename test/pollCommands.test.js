@@ -178,10 +178,11 @@ describe('pollCommands', () => {
       assert.equal(parsed.size, null);
     });
 
-    it('should parse flags like --no-matchups and --courts', () => {
-      const parsed = parsePollCreationText('!createpoll 4 today 6pm --no-matchups --courts');
+    it('should parse flags like --no-matchups and --courts-strategy', () => {
+      const parsed = parsePollCreationText('!createpoll 4 today 6pm --no-matchups --courts-strategy=lookup');
       assert.ok(parsed);
       assert.equal(parsed.noMatchups, true);
+      assert.equal(parsed.courtsStrategy, 'lookup');
       assert.equal(parsed.checkCourts, true);
     });
 
@@ -1546,6 +1547,75 @@ describe('pollCommands', () => {
 
         assert.equal(bookCallCount, 2, 'Should pre-book 2 courts when maxCourts=2 and preBookCourts is omitted');
         assert.equal(res.advanceBookedCourts.length, 2);
+      } finally {
+        scvcc.bookCourt = originalBookCourt;
+      }
+    });
+
+    it('should default pre-book courts to maxCourts when preBookCourts is not specified on a fixed-size poll', async () => {
+      const originalBookCourt = scvcc.bookCourt;
+      let bookCallCount = 0;
+
+      scvcc.bookCourt = async (params) => {
+        bookCallCount++;
+        return {
+          success: true,
+          court: `Court ${bookCallCount}`,
+          players: params.players,
+          date: params.date,
+          time: params.time,
+          reservationId: `res-fixedmax-${bookCallCount}`,
+          message: `Court ${bookCallCount} booked`
+        };
+      };
+
+      try {
+        const res = await preBookCourtsForMatch({
+          remoteJid: '120363403838804497@g.us',
+          targetDateMDY: '10/22/2026',
+          queryTime: '9:00 AM',
+          size: 4,
+          isAuto: false,
+          maxCourts: 2
+        });
+
+        assert.equal(bookCallCount, 2, 'Should pre-book 2 courts when maxCourts=2 and preBookCourts is omitted on a fixed-size poll');
+        assert.equal(res.advanceBookedCourts.length, 2);
+      } finally {
+        scvcc.bookCourt = originalBookCourt;
+      }
+    });
+
+    it('should keep explicit preBookCourts when specified even if maxCourts is also specified', async () => {
+      const originalBookCourt = scvcc.bookCourt;
+      let bookCallCount = 0;
+
+      scvcc.bookCourt = async (params) => {
+        bookCallCount++;
+        return {
+          success: true,
+          court: `Court ${bookCallCount}`,
+          players: params.players,
+          date: params.date,
+          time: params.time,
+          reservationId: `res-explicit-${bookCallCount}`,
+          message: `Court ${bookCallCount} booked`
+        };
+      };
+
+      try {
+        const res = await preBookCourtsForMatch({
+          remoteJid: '120363403838804497@g.us',
+          targetDateMDY: '10/22/2026',
+          queryTime: '9:00 AM',
+          size: 4,
+          isAuto: false,
+          preBookCourts: 1,
+          maxCourts: 3
+        });
+
+        assert.equal(bookCallCount, 1, 'Should preserve explicit preBookCourts=1 despite maxCourts=3');
+        assert.equal(res.advanceBookedCourts.length, 1);
       } finally {
         scvcc.bookCourt = originalBookCourt;
       }

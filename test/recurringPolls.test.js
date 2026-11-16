@@ -62,16 +62,38 @@ describe('recurringPolls', () => {
       assert.equal(res3.flags.maxCourts, 2);
     });
 
-    it('should extract common CLI flags and return cleaned remaining text', () => {
-      const text = '8 Mon-Thu 7pm --no-matchups --courts --pre-book-courts=2 --court-booking-type=pre-book';
+    it('should extract --courts-strategy=book and set booking & lookup flags', () => {
+      const text = '8 Mon-Thu 7pm --no-matchups --courts-strategy=book --pre-book-courts=2';
       const { flags, remainingText } = extractCommonFlags(text);
 
       assert.equal(flags.lineupGeneration, 'none');
       assert.equal(flags.noMatchups, undefined);
+      assert.equal(flags.courtsStrategy, 'book');
       assert.equal(flags.checkCourts, true);
-      assert.equal(flags.preBookCourts, 2);
       assert.equal(flags.courtBookingType, 'pre-book');
+      assert.equal(flags.preBookCourts, 2);
       assert.match(remainingText, /8 Mon-Thu 7pm/);
+    });
+
+    it('should extract --courts-strategy=lookup and --courts-strategy=none and drop old flags', () => {
+      const textLookup = '8 Mon-Thu 7pm --courts-strategy=lookup';
+      const resLookup = extractCommonFlags(textLookup);
+      assert.equal(resLookup.flags.courtsStrategy, 'lookup');
+      assert.equal(resLookup.flags.checkCourts, true);
+      assert.equal(resLookup.flags.courtBookingType, 'none');
+
+      const textNone = '8 Mon-Thu 7pm --courts-strategy=none';
+      const resNone = extractCommonFlags(textNone);
+      assert.equal(resNone.flags.courtsStrategy, 'none');
+      assert.equal(resNone.flags.checkCourts, false);
+      assert.equal(resNone.flags.courtBookingType, 'none');
+
+      // Old flags --courts, --court-booking-type should not be recognized
+      const textOld = '8 Mon-Thu 7pm --courts --court-booking-type=pre-book';
+      const resOld = extractCommonFlags(textOld);
+      assert.equal(resOld.flags.courtsStrategy, undefined);
+      assert.equal(resOld.flags.checkCourts, undefined);
+      assert.equal(resOld.flags.courtBookingType, undefined);
     });
 
     it('should extract --pre-allocate-slots flag', () => {

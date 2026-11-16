@@ -89,45 +89,61 @@ describe('pollSimulation', () => {
       const sock = createMockSock();
       const activePolls = new Map();
       let preBookExecuted = false;
+      const origCheck = scvcc.checkCourtAvailability;
+      const origBookings = scvcc.getCourtBookings;
+      scvcc.checkCourtAvailability = async () => ({
+        slots: [{
+          courts: [
+            { court: 'Court 1', status: 'available', availableMinutes: 90 },
+            { court: 'Court 2', status: 'available', availableMinutes: 90 }
+          ]
+        }]
+      });
+      scvcc.getCourtBookings = async () => ({ bookings: [] });
 
-      const res = await pollCommands.createMatchPoll(
-        sock,
-        '120363402559062529@g.us',
-        4,
-        'Tomorrow 6pm',
-        'tomorrow',
-        '6pm',
-        'Alice',
-        'alice@s.whatsapp.net',
-        true,
-        null,
-        false,
-        true,
-        false,
-        false,
-        false,
-        false,
-        null,
-        null,
-        'pre-book', // courtBookingType
-        null,
-        1,
-        null,
-        null,
-        { activePolls },
-        {
-          simulate: true,
-          preBookCourtsForMatch: async () => {
-            preBookExecuted = true;
-            return { advanceBookedCourts: [], prebookedCourts: [] };
+      try {
+        const res = await pollCommands.createMatchPoll(
+          sock,
+          '120363402559062529@g.us',
+          4,
+          'Tomorrow 6pm',
+          'tomorrow',
+          '6pm',
+          'Alice',
+          'alice@s.whatsapp.net',
+          true,
+          null,
+          false,
+          true,
+          false,
+          false,
+          false,
+          false,
+          null,
+          null,
+          'pre-book', // courtBookingType
+          null,
+          1,
+          null,
+          null,
+          { activePolls },
+          {
+            simulate: true,
+            preBookCourtsForMatch: async () => {
+              preBookExecuted = true;
+              return { advanceBookedCourts: [], prebookedCourts: [] };
+            }
           }
-        }
-      );
+        );
 
-      assert.equal(res.err, null);
-      assert.equal(res.isSimulation, true);
-      assert.equal(preBookExecuted, false);
-      assert.equal(activePolls.size, 0);
+        assert.equal(res.err, null);
+        assert.equal(res.isSimulation, true);
+        assert.equal(preBookExecuted, false);
+        assert.equal(activePolls.size, 0);
+      } finally {
+        scvcc.checkCourtAvailability = origCheck;
+        scvcc.getCourtBookings = origBookings;
+      }
     });
   });
 
@@ -152,7 +168,7 @@ describe('pollSimulation', () => {
       try {
         const res = await routeCommand(
           sock,
-          '!simulatepoll 8 7pm tomorrow --courts',
+          '!simulatepoll 8 7pm tomorrow --courts-strategy=lookup',
           '120363402559062529@g.us',
           'Alice',
           { key: { participant: 'alice@s.whatsapp.net', remoteJid: '120363402559062529@g.us' } },
