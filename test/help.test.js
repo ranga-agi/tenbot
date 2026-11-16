@@ -27,6 +27,8 @@ describe('help', () => {
     assert.match(text, /Create Match Poll \(!poll\)/);
     assert.match(text, /Usage:/);
     assert.match(text, /Options:/);
+    assert.match(text, /`\[at <postTime>\]` — When to create and post the poll/);
+    assert.match(text, /future poll creation time using the at option/);
     assert.match(text, /`--courts-strategy=book\|lookup\|none`/);
     assert.equal(text.includes('`--no-matchups`'), false);
     assert.match(text, /`--single-vote` \/ `--multi-vote`/);
@@ -37,6 +39,7 @@ describe('help', () => {
     assert.match(text, /`--pre-allocate-slots` — Include pre-allocated court slots/);
     assert.match(text, /`--reminders` \/ `--no-reminders`/);
     assert.equal(text.includes('`--court-booking-type`'), false);
+    assert.match(text, /`--booking-court-preference="<order>"` \(or `--court-preference="<order>"`\)/);
     assert.match(text, /`--look-around="<window>"` — Time window to search/);
     assert.match(text, /Examples:/);
   });
@@ -63,6 +66,8 @@ describe('help', () => {
     assert.match(text, /`--single-session` \/ `--independent-sessions`/);
     assert.match(text, /`--booking-strategy=advanced\|standard` — Booking strategy/);
     assert.match(text, /`--booking-schedule="<offset>"` — Advance booking trigger schedule/);
+    assert.match(text, /`--booking-court-preference="<order>"` \(or `--court-preference="<order>"`\)/);
+    assert.match(text, /poll creation time/i);
     assert.match(text, /`--look-around="<window>"`/);
     assert.match(text, /`--pre-allocate-slots` — Include pre-allocated court slots/);
     assert.match(text, /advance court pre-booking/i);
@@ -113,6 +118,7 @@ describe('help', () => {
     assert.match(text, /`--single-vote` \/ `--multi-vote`/);
     assert.match(text, /`--single-session` \/ `--independent-sessions`/);
     assert.match(text, /`--lineups=filled\|fallback\|none`/);
+    assert.match(text, /`--booking-court-preference="<order>"` \(or `--court-preference="<order>"`\)/);
     assert.match(text, /`--pre-allocate-slots` — Include pre-allocated court slots/);
   });
 

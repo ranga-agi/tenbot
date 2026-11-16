@@ -1,3 +1,4 @@
+const recurringPollsModule = require('../lib/recurringPolls');
 process.env.NODE_ENV = 'test';
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
@@ -15,6 +16,8 @@ const {
   getFirstSlotNumber,
   extractFixedPairsFromText,
   parsePollCreationText,
+  extractPollCreationPostTime,
+  isPostTimeInFuture,
   handleDirectPollCreation,
   extractNamedPlayersFromTitle,
   resolveManualPollPlayers,
@@ -6493,4 +6496,233 @@ describe('pollCommands', () => {
       assert.ok(deletedIds.includes(p1Id), 'Part 1 should be deleted from WhatsApp');
       assert.ok(deletedIds.includes(p2Id), 'Part 2 should be deleted from WhatsApp');
     });
+  
+  describe('scheduled regular poll creation with at <postTime>', () => {
+    it('should parse postTime for regular poll with at <postTime>', () => {
+      const res1 = parsePollCreationText('!poll 4 tomorrow 7pm at 8am');
+      assert.ok(res1);
+      assert.equal(res1.size, 4);
+      assert.equal(res1.dayWord, 'tomorrow');
+      assert.equal(res1.timeWord, '7pm');
+      assert.equal(res1.when, 'Tomorrow 7pm');
+      assert.equal(res1.postTime, '8am');
+      assert.equal(res1.at, '8am');
+
+      const res2 = parsePollCreationText('!poll 4 tomorrow at 7pm at 8am');
+      assert.ok(res2);
+      assert.equal(res2.size, 4);
+      assert.equal(res2.timeWord, '7pm');
+      assert.equal(res2.postTime, '8am');
+
+      const res3 = parsePollCreationText('!poll 4 tomorrow 7pm at 1 day before at 6pm');
+      assert.ok(res3);
+      assert.equal(res3.size, 4);
+      assert.equal(res3.timeWord, '7pm');
+      assert.equal(res3.postTime, '1 day before at 6pm');
+
+      const res4 = parsePollCreationText('!poll auto Saturday 9am at Friday 6pm');
+      assert.ok(res4);
+      assert.equal(res4.size, 'auto');
+      assert.equal(res4.dayWord.toLowerCase(), 'saturday');
+      assert.equal(res4.timeWord, '9am');
+      assert.equal(res4.postTime, 'Friday 6pm');
+
+      const res5 = parsePollCreationText('!poll 4 tomorrow 7pm at 2h before');
+      assert.ok(res5);
+      assert.equal(res5.size, 4);
+      assert.equal(res5.timeWord, '7pm');
+      assert.equal(res5.postTime, '2h before');
+
+      const res6 = parsePollCreationText('!poll 4 tomorrow 7pm --at="8am"');
+      assert.ok(res6);
+      assert.equal(res6.size, 4);
+      assert.equal(res6.timeWord, '7pm');
+      assert.equal(res6.postTime, '8am');
+
+      const res7 = parsePollCreationText('!poll 4 tomorrow 7pm --post-time=8am');
+      assert.ok(res7);
+      assert.equal(res7.size, 4);
+      assert.equal(res7.timeWord, '7pm');
+      assert.equal(res7.postTime, '8am');
+
+      const res8 = parsePollCreationText('!poll 4 tomorrow 7pm post at 8am');
+      assert.ok(res8);
+      assert.equal(res8.size, 4);
+      assert.equal(res8.timeWord, '7pm');
+      assert.equal(res8.postTime, '8am');
+
+      const res9 = parsePollCreationText('!poll Saturday 8am, 9:30am, 4pm at Friday 6pm');
+      assert.ok(res9);
+      assert.equal(res9.timeSlots.length, 3);
+      assert.equal(res9.postTime, 'Friday 6pm');
+      assert.equal(res9.dayWord.toLowerCase(), 'saturday');
+    });
+
+    it('should NOT treat single time with at as postTime', () => {
+      const res1 = parsePollCreationText('!poll 4 tomorrow at 7pm');
+      assert.ok(res1);
+      assert.equal(res1.size, 4);
+      assert.equal(res1.timeWord, '7pm');
+      assert.equal(res1.postTime, null);
+
+      const res2 = parsePollCreationText('!poll 4 at 7pm');
+      assert.ok(res2);
+      assert.equal(res2.size, 4);
+      assert.equal(res2.timeWord, '7pm');
+      assert.equal(res2.postTime, null);
+    });
+
+    it('should correctly determine isPostTimeInFuture', () => {
+      // Mock San Jose now: Friday 2026-11-20 12:00 PM
+      const mockNowParts = {
+        year: 2026,
+        month: 10, // Nov
+        day: 20,
+        weekday: 'fri',
+        hour: 12,
+        minute: 0
+      };
+
+      // Match tomorrow (Saturday) 7pm, post at 8am -> Saturday 8am is future
+      const futureCheck1 = isPostTimeInFuture('8am', 'tomorrow', '7pm', mockNowParts);
+      assert.equal(futureCheck1.isFuture, true);
+      assert.equal(futureCheck1.targetMatchDateKey, '2026-11-21');
+      assert.equal(futureCheck1.targetMatchDayIndex, 6);
+
+      // Match tomorrow (Saturday) 7pm, post at Friday 6pm (later today) -> future
+      const futureCheck2 = isPostTimeInFuture('Friday 6pm', 'tomorrow', '7pm', mockNowParts);
+      assert.equal(futureCheck2.isFuture, true);
+
+      // Match today (Friday) 7pm, post at 8am (earlier today) -> past
+      const pastCheck1 = isPostTimeInFuture('8am', 'today', '7pm', mockNowParts);
+      assert.equal(pastCheck1.isFuture, false);
+
+      // Match today (Friday) 7pm, post at 5pm (later today) -> future
+      const futureCheck3 = isPostTimeInFuture('5pm', 'today', '7pm', mockNowParts);
+      assert.equal(futureCheck3.isFuture, true);
+    });
+
+    it('should schedule future regular poll in recurringPolls with oneTime: true', async () => {
+      // Mock San Jose now: Friday 12:00 PM
+      const mockNowParts = {
+        year: 2026,
+        month: 10,
+        day: 20,
+        weekday: 'fri',
+        hour: 12,
+        minute: 0
+      };
+
+      const recurringPolls = new Map();
+      let persisted = false;
+      const context = {
+        recurringPolls,
+        persistPolls: () => { persisted = true; },
+        customSanJoseParts: mockNowParts
+      };
+
+      const mockSock = {
+        sendMessage: async () => ({})
+      };
+
+      const parsed = parsePollCreationText('!poll 4 tomorrow 7pm at 8am');
+      assert.ok(parsed);
+      assert.equal(parsed.postTime, '8am');
+
+      const res = await handleDirectPollCreation(
+        mockSock,
+        '120363403838804497@g.us',
+        'Alice',
+        null,
+        parsed,
+        {},
+        context
+      );
+
+      assert.match(res, /Scheduled Match Poll/);
+      assert.match(res, /4 spots \(Doubles\)/);
+      assert.equal(recurringPolls.size, 1);
+
+      const [scheduleId, sched] = [...recurringPolls.entries()][0];
+      assert.equal(sched.oneTime, true);
+      assert.equal(sched.size, 4);
+      assert.equal(sched.postTime, '8am');
+      assert.equal(sched.enabled, true);
+      assert.equal(sched.completed, undefined);
+      assert.equal(persisted, true);
+
+      // Verify formatRecurringScheduleCard displays Scheduled Match Poll and Match Date
+      const card = recurringPollsModule.formatRecurringScheduleCard(sched, 0, 1, mockNowParts);
+      assert.match(card, /Scheduled Match Poll/);
+      assert.match(card, /Match Date:/);
+      assert.match(card, /Scheduled to post/);
+    });
+
+    it('should auto-retire oneTime schedule after posting in checkAndPostRecurringPolls', async () => {
+      const recurringPolls = new Map();
+      let persisted = false;
+      let matchPollCreated = false;
+
+      const scheduleId = 'rec_test_onetime';
+      const sched = {
+        id: scheduleId,
+        remoteJid: '120363403838804497@g.us',
+        size: 4,
+        matchTime: '7pm',
+        matchHour: 19,
+        matchMinute: 0,
+        postTime: '8am',
+        postHour: 8,
+        postMinute: 0,
+        postTimesByDay: {
+          6: { hour: 8, minute: 0, postHour: 8, postMinute: 0, daysBefore: 0, postDayIndex: 6 }
+        },
+        days: 'Saturday',
+        daysList: [6],
+        daysDisplay: 'Saturday',
+        oneTime: true,
+        startDate: '2026-11-21',
+        endDate: '2026-11-21',
+        enabled: true,
+        postedMatchDates: [],
+        creator: { name: 'Alice', jid: 'alice@s.whatsapp.net' }
+      };
+      recurringPolls.set(scheduleId, sched);
+
+      const mockSock = {
+        sendMessage: async () => ({})
+      };
+
+      // Mock San Jose time at posting time: Saturday 2026-11-21 8:05 AM
+      const postSweepParts = {
+        year: 2026,
+        month: 10,
+        day: 21,
+        weekday: 'sat',
+        hour: 8,
+        minute: 5
+      };
+
+      await recurringPollsModule.checkAndPostRecurringPolls({
+        sock: mockSock,
+        recurringPolls,
+        persistPolls: () => { persisted = true; },
+        createMatchPoll: async () => {
+          matchPollCreated = true;
+          return { pollId: 'poll_onetime_posted' };
+        },
+        getTargetGroupJid: async () => '120363403838804497@g.us',
+        customSanJoseParts: postSweepParts
+      });
+
+      assert.equal(matchPollCreated, true, 'createMatchPoll should have been called');
+      assert.equal(sched.enabled, false, 'oneTime schedule should be disabled after posting');
+      assert.equal(sched.completed, true, 'oneTime schedule should be marked completed');
+      assert.equal(sched.postedMatchDates.includes('2026-11-21'), true);
+
+      // Verify status string shows Completed
+      const completedCard = recurringPollsModule.formatRecurringScheduleCard(sched, 0, 1, postSweepParts);
+      assert.match(completedCard, /🏁 Completed/);
+    });
   });
+});
