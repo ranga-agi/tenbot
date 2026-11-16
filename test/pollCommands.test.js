@@ -15,6 +15,7 @@ const {
   getFirstSlotNumber,
   extractFixedPairsFromText,
   parsePollCreationText,
+  handleDirectPollCreation,
   extractNamedPlayersFromTitle,
   resolveManualPollPlayers,
   buildPollReminderText,
@@ -6090,6 +6091,66 @@ describe('pollCommands', () => {
         // Because maxCourts is 1 and preference is [3, 2, 1], Court 3 should be selected as the unbooked court!
         assert.equal(pollState.unbookedCourts.length, 1);
         assert.equal(pollState.unbookedCourts[0].court, 'Court 3', 'Court 3 should be chosen based on preference override');
+      } finally {
+        scvcc.checkCourtAvailability = origCheck;
+        scvcc.getCourtBookings = origBookings;
+        groupsConfig.getGroupConfig = origGetConfig;
+      }
+    });
+
+    it('handleDirectPollCreation forwards --booking-court-preference to createMatchPoll overriding group default', async () => {
+      const origCheck = scvcc.checkCourtAvailability;
+      const origBookings = scvcc.getCourtBookings;
+      const origGetConfig = groupsConfig.getGroupConfig;
+
+      try {
+        groupsConfig.getGroupConfig = () => ({
+          courtBookingEnabled: true,
+          bookingCourtPreference: ['2', '3', '1', '5']
+        });
+
+        scvcc.checkCourtAvailability = async () => ({
+          slots: [{
+            time: '7:00 PM',
+            courts: [
+              { court: 'Court 1', status: 'available', availableMinutes: 90 },
+              { court: 'Court 2', status: 'available', availableMinutes: 90 },
+              { court: 'Court 3', status: 'available', availableMinutes: 90 },
+              { court: 'Court 5', status: 'available', availableMinutes: 90 },
+              { court: 'Court 6', status: 'available', availableMinutes: 90 }
+            ]
+          }]
+        });
+        scvcc.getCourtBookings = async () => ({ bookings: [] });
+
+        const activePolls = new Map();
+        const context = { activePolls, messageStore: new Map(), persistPolls: () => {}, latestPollIdByChat: new Map() };
+
+        let sentPollTitle = '';
+        const mockSock = {
+          sendMessage: async (chatId, content) => {
+            if (content?.poll?.name) sentPollTitle = content.poll.name;
+            return { key: { id: 'poll_pref_test' } };
+          }
+        };
+
+        const parsed = parsePollCreationText('!poll auto tomorrow 7pm --courts-strategy=lookup --booking-court-preference="5,6,1,3"');
+        await handleDirectPollCreation(
+          mockSock,
+          '120363403838804497@g.us',
+          'Alice',
+          null,
+          parsed,
+          { isCommand: true },
+          context
+        );
+
+        const pollState = activePolls.get('poll_pref_test');
+        assert.ok(pollState, 'Poll should be tracked');
+        assert.deepEqual(pollState.bookingCourtPreference, ['5', '6', '1', '3']);
+        assert.match(sentPollTitle, /Court 5 - Available/);
+        assert.match(sentPollTitle, /Court 6 - Available/);
+        assert.match(sentPollTitle, /Court 1 - Available/);
       } finally {
         scvcc.checkCourtAvailability = origCheck;
         scvcc.getCourtBookings = origBookings;
