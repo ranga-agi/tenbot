@@ -1,6 +1,6 @@
 const recurringPollsModule = require('../lib/recurringPolls');
 process.env.NODE_ENV = 'test';
-const { describe, it } = require('node:test');
+const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const scvcc = require('../lib/scvcc');
 const groupsConfig = require('../lib/groupsConfig');
@@ -6723,6 +6723,302 @@ describe('pollCommands', () => {
       // Verify status string shows Completed
       const completedCard = recurringPollsModule.formatRecurringScheduleCard(sched, 0, 1, postSweepParts);
       assert.match(completedCard, /🏁 Completed/);
+    });
+  });
+  describe("Numerical poll size scaling down when courts are insufficient (Option B)", () => {
+    let origCheck;
+    let origBookings;
+    let origGetConfig;
+
+    beforeEach(() => {
+      origCheck = scvcc.checkCourtAvailability;
+      origBookings = scvcc.getCourtBookings;
+      origGetConfig = groupsConfig.getGroupConfig;
+      groupsConfig.getGroupConfig = () => ({
+        sport: "tennis",
+        courtBookingEnabled: true,
+        tentativeBookingTitles: ["Clinic", "Club Event"]
+      });
+    });
+
+    afterEach(() => {
+      scvcc.checkCourtAvailability = origCheck;
+      scvcc.getCourtBookings = origBookings;
+      groupsConfig.getGroupConfig = origGetConfig;
+    });
+
+    it("should scale down from size 8 to 4 when only 1 court is found with checkCourts=true", async () => {
+      scvcc.checkCourtAvailability = async () => ({
+        slots: [{ courts: [] }]
+      });
+      scvcc.getCourtBookings = async () => ({
+        bookings: [
+          { court: "Court 2", blockTitle: "Pramod Immaneni", players: ["Pramod Immaneni"], durationMins: 90 }
+        ]
+      });
+
+      let sentPoll = null;
+      const mockSock = {
+        sendMessage: async (jid, content) => {
+          if (content.poll) sentPoll = content.poll;
+          return { key: { id: "poll_scale_down_1", remoteJid: jid }, message: content };
+        }
+      };
+      const activePolls = new Map();
+      const context = { activePolls, persistPolls: () => {} };
+
+      const res = await createMatchPoll(
+        mockSock,
+        "group1@g.us",
+        8,
+        "Tomorrow 7pm",
+        null,
+        "7pm",
+        "Alice",
+        "alice@s.whatsapp.net",
+        false, // includeCreator
+        null,
+        false,
+        false,
+        false,
+        true, // checkCourts
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        context
+      );
+
+      assert.ok(sentPoll, "Poll should be sent");
+      assert.equal(res.size, 4, "Poll size should scale down from 8 to 4");
+      assert.equal(sentPoll.values.length, 4, "Values should have 4 slots");
+      assert.deepEqual(sentPoll.values, ["Player 1", "Player 2", "Player 3", "Player 4"]);
+      assert.match(sentPoll.name, /Court 2 - Booked/);
+      assert.match(sentPoll.name, /4 slots \/ 4/);
+    });
+
+    it("should keep size 8 when 2 courts (1 booked, 1 available) are found", async () => {
+      scvcc.checkCourtAvailability = async () => ({
+        slots: [{
+          courts: [
+            { court: "Court 1", status: "available", availableMinutes: 90 }
+          ]
+        }]
+      });
+      scvcc.getCourtBookings = async () => ({
+        bookings: [
+          { court: "Court 2", blockTitle: "Pramod Immaneni", players: ["Pramod Immaneni"], durationMins: 90 }
+        ]
+      });
+
+      let sentPoll = null;
+      const mockSock = {
+        sendMessage: async (jid, content) => {
+          if (content.poll) sentPoll = content.poll;
+          return { key: { id: "poll_keep_8", remoteJid: jid }, message: content };
+        }
+      };
+      const activePolls = new Map();
+      const context = { activePolls, persistPolls: () => {} };
+
+      const res = await createMatchPoll(
+        mockSock,
+        "group1@g.us",
+        8,
+        "Tomorrow 7pm",
+        null,
+        "7pm",
+        "Alice",
+        "alice@s.whatsapp.net",
+        false,
+        null,
+        false,
+        false,
+        false,
+        true, // checkCourts
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        context
+      );
+
+      assert.ok(sentPoll, "Poll should be sent");
+      assert.equal(res.size, 8, "Poll size should remain 8");
+      assert.equal(sentPoll.values.length, 8, "Values should have 8 slots");
+      // Slots 5-8 should be tentative because Court 1 is available (unbooked)
+      assert.equal(sentPoll.values[0], "Player 1");
+      assert.match(sentPoll.values[4], /Player 5/);
+      assert.match(sentPoll.values[4], /[✱*]/);
+    });
+
+    it("should scale down from size 12 to 8 when 2 courts (1 booked, 1 tentative) are found", async () => {
+      scvcc.checkCourtAvailability = async () => ({
+        slots: [{ courts: [] }]
+      });
+      scvcc.getCourtBookings = async () => ({
+        bookings: [
+          { court: "Court 2", blockTitle: "Pramod Immaneni", players: ["Pramod Immaneni"], durationMins: 90 },
+          { court: "Court 3", blockTitle: "Tennis Clinic", type: "Clinic", durationMins: 90 }
+        ]
+      });
+
+      let sentPoll = null;
+      const mockSock = {
+        sendMessage: async (jid, content) => {
+          if (content.poll) sentPoll = content.poll;
+          return { key: { id: "poll_scale_down_12_to_8", remoteJid: jid }, message: content };
+        }
+      };
+      const activePolls = new Map();
+      const context = { activePolls, persistPolls: () => {} };
+
+      const res = await createMatchPoll(
+        mockSock,
+        "group1@g.us",
+        12,
+        "Tomorrow 7pm",
+        null,
+        "7pm",
+        "Alice",
+        "alice@s.whatsapp.net",
+        false,
+        null,
+        false,
+        false,
+        false,
+        true, // checkCourts
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        context
+      );
+
+      assert.ok(sentPoll, "Poll should be sent");
+      assert.equal(res.size, 8, "Poll size should scale down from 12 to 8");
+      assert.equal(sentPoll.values.length, 8, "Values should have 8 slots");
+    });
+
+    it("should NOT scale down when checkCourts is false", async () => {
+      let sentPoll = null;
+      const mockSock = {
+        sendMessage: async (jid, content) => {
+          if (content.poll) sentPoll = content.poll;
+          return { key: { id: "poll_no_check_courts", remoteJid: jid }, message: content };
+        }
+      };
+      const activePolls = new Map();
+      const context = { activePolls, persistPolls: () => {} };
+
+      const res = await createMatchPoll(
+        mockSock,
+        "group1@g.us",
+        8,
+        "Tomorrow 7pm",
+        null,
+        "7pm",
+        "Alice",
+        "alice@s.whatsapp.net",
+        false,
+        null,
+        false,
+        false,
+        false,
+        false, // checkCourts = false
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        context
+      );
+
+      assert.ok(sentPoll, "Poll should be sent");
+      assert.equal(res.size, 8, "Poll size should remain 8 when checkCourts=false");
+      assert.equal(sentPoll.values.length, 8, "Values should have 8 slots");
+    });
+    it("should scale down multi-time slot size from 8 to 4 when only 1 court is found", async () => {
+      scvcc.checkCourtAvailability = async () => ({
+        slots: [{ courts: [] }]
+      });
+      scvcc.getCourtBookings = async () => ({
+        bookings: [
+          { court: "Court 2", blockTitle: "Pramod Immaneni", players: ["Pramod Immaneni"], durationMins: 90 }
+        ]
+      });
+
+      let sentPoll = null;
+      const mockSock = {
+        sendMessage: async (jid, content) => {
+          if (content.poll) sentPoll = content.poll;
+          return { key: { id: "poll_multi_scale_down", remoteJid: jid }, message: content };
+        }
+      };
+      const activePolls = new Map();
+      const context = { activePolls, persistPolls: () => {} };
+
+      const timeSlots = [
+        { dayWord: "Saturday", timeWord: "8am", size: 8 },
+        { dayWord: "Saturday", timeWord: "9:30am", size: 4 }
+      ];
+
+      const res = await createMatchPoll(
+        mockSock,
+        "group1@g.us",
+        null,
+        "Saturday 8am",
+        null,
+        null,
+        "Alice",
+        "alice@s.whatsapp.net",
+        false,
+        null,
+        false,
+        true,
+        false,
+        true, // checkCourts
+        false,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        context,
+        { timeSlots }
+      );
+
+      assert.equal(res.err, null);
+      assert.equal(res.isMultiTime, true);
+      assert.equal(res.timeSlots[0].size, 4, "Slot size should scale down from 8 to 4");
+      assert.equal(res.timeSlots[0].slotLimit, 4, "Slot limit should scale down from 8 to 4");
+      assert.deepEqual(res.options, [
+        "8am (4 spots)",
+        "9:30am (4 spots)",
+        "No / Can't play"
+      ]);
     });
   });
 });

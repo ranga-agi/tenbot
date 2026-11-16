@@ -1,7 +1,7 @@
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { extractCommonFlags, scheduleRecurringPoll } = require('../lib/recurringPolls');
-const { migrateCourtsStrategyOptions } = require('../lib/pollStore');
+const { migrateCourtsStrategyOptions, migrateAutoSizeAndMaxCourtsOptions } = require('../lib/pollStore');
 const { parsePollCreationText, pollStatusText, createMatchPoll } = require('../lib/commands/pollCommands');
 
 describe('courtsStrategy option and startup migration', () => {
@@ -231,6 +231,185 @@ describe('courtsStrategy option and startup migration', () => {
 
       const text3 = pollStatusText('grp1@g.us', { targetId: 'p3' }, { activePolls });
       assert.match(text3, /Courts Strategy: None/);
+    });
+  });
+  describe("migrateAutoSizeAndMaxCourtsOptions startup migration", () => {
+    it("should migrate active poll with size auto and maxCourts to numerical size", () => {
+      const activePolls = new Map([
+        ["poll_auto_1", {
+          id: "poll_auto_1",
+          remoteJid: "grp1@g.us",
+          size: "auto",
+          isAuto: true,
+          maxCourts: 2
+        }],
+        ["poll_auto_2", {
+          id: "poll_auto_2",
+          remoteJid: "grp1@g.us",
+          size: "auto",
+          isAuto: true,
+          maxCourts: 3,
+          courtsStrategy: "book"
+        }]
+      ]);
+
+      const count = migrateAutoSizeAndMaxCourtsOptions({ activePolls });
+      assert.equal(count, 2);
+
+      const p1 = activePolls.get("poll_auto_1");
+      assert.equal(p1.size, 8);
+      assert.equal(p1.type, "fixed");
+      assert.equal(p1.isAuto, undefined);
+      assert.equal(p1.maxCourts, undefined);
+      assert.equal(p1.courtsStrategy, "lookup");
+
+      const p2 = activePolls.get("poll_auto_2");
+      assert.equal(p2.size, 12);
+      assert.equal(p2.type, "fixed");
+      assert.equal(p2.isAuto, undefined);
+      assert.equal(p2.maxCourts, undefined);
+      assert.equal(p2.courtsStrategy, "book");
+    });
+
+    it("should migrate active poll with size auto and existing options", () => {
+      const activePolls = new Map([
+        ["poll_opts", {
+          id: "poll_opts",
+          remoteJid: "grp1@g.us",
+          size: "auto",
+          isAuto: true,
+          options: ["Player 1", "Player 2", "Player 3", "Player 4"]
+        }]
+      ]);
+
+      const count = migrateAutoSizeAndMaxCourtsOptions({ activePolls });
+      assert.equal(count, 1);
+
+      const p = activePolls.get("poll_opts");
+      assert.equal(p.size, 4);
+      assert.equal(p.type, "fixed");
+      assert.equal(p.isAuto, undefined);
+    });
+
+    it("should migrate recurring schedules with auto size and maxCourts", () => {
+      const recurringPolls = new Map([
+        ["rec_auto_1", {
+          id: "rec_auto_1",
+          remoteJid: "grp1@g.us",
+          size: "auto",
+          isAuto: true,
+          maxCourts: 2,
+          "max-courts": 2
+        }],
+        ["rec_auto_3", {
+          id: "rec_auto_3",
+          remoteJid: "grp1@g.us",
+          size: "auto",
+          isAuto: true,
+          maxCourts: 3,
+          courtsStrategy: "book"
+        }]
+      ]);
+
+      const count = migrateAutoSizeAndMaxCourtsOptions({ recurringPolls });
+      assert.equal(count, 2);
+
+      const r1 = recurringPolls.get("rec_auto_1");
+      assert.equal(r1.size, 8);
+      assert.equal(r1.isAuto, undefined);
+      assert.equal(r1.maxCourts, undefined);
+      assert.equal(r1["max-courts"], undefined);
+      assert.equal(r1.courtsStrategy, "lookup");
+
+      const r2 = recurringPolls.get("rec_auto_3");
+      assert.equal(r2.size, 12);
+      assert.equal(r2.isAuto, undefined);
+      assert.equal(r2.maxCourts, undefined);
+      assert.equal(r2.courtsStrategy, "book");
+    });
+
+    it("should migrate multi-time poll slots with auto size", () => {
+      const recurringPolls = new Map([
+        ["rec_mt", {
+          id: "rec_mt",
+          remoteJid: "grp1@g.us",
+          size: "auto",
+          maxCourts: 2,
+          timeSlots: [
+            { timeWord: "8am", size: "auto", maxCourts: 1 },
+            { timeWord: "9:30am", size: "auto", maxCourts: 2 }
+          ]
+        }]
+      ]);
+
+      const count = migrateAutoSizeAndMaxCourtsOptions({ recurringPolls });
+      assert.equal(count, 1);
+
+      const r = recurringPolls.get("rec_mt");
+      assert.equal(r.size, 8);
+      assert.equal(r.timeSlots[0].size, 4);
+      assert.equal(r.timeSlots[0].slotLimit, 4);
+      assert.equal(r.timeSlots[0].isAuto, undefined);
+      assert.equal(r.timeSlots[0].maxCourts, undefined);
+
+      assert.equal(r.timeSlots[1].size, 8);
+      assert.equal(r.timeSlots[1].slotLimit, 8);
+      assert.equal(r.timeSlots[1].isAuto, undefined);
+      assert.equal(r.timeSlots[1].maxCourts, undefined);
+    });
+
+    it("should migrate instanceSlotOverrides with auto values", () => {
+      const recurringPolls = new Map([
+        ["rec_over", {
+          id: "rec_over",
+          remoteJid: "grp1@g.us",
+          size: 8,
+          maxCourts: 2,
+          instanceSlotOverrides: {
+            "2026-11-20": "auto"
+          }
+        }]
+      ]);
+
+      const count = migrateAutoSizeAndMaxCourtsOptions({ recurringPolls });
+      assert.equal(count, 1);
+
+      const r = recurringPolls.get("rec_over");
+      assert.equal(r.size, 8);
+      assert.equal(r.instanceSlotOverrides["2026-11-20"], 8);
+      assert.equal(r.maxCourts, undefined);
+    });
+
+    it("should clean up maxCourts from opt-in polls without changing size to number", () => {
+      const activePolls = new Map([
+        ["poll_optin", {
+          id: "poll_optin",
+          remoteJid: "grp1@g.us",
+          type: "opt_in",
+          size: null,
+          maxCourts: 2
+        }]
+      ]);
+
+      const count = migrateAutoSizeAndMaxCourtsOptions({ activePolls });
+      assert.equal(count, 1);
+
+      const p = activePolls.get("poll_optin");
+      assert.equal(p.size, null);
+      assert.equal(p.maxCourts, undefined);
+    });
+
+    it("should not re-migrate polls that are already in the new format", () => {
+      const activePolls = new Map([
+        ["poll_clean", {
+          id: "poll_clean",
+          remoteJid: "grp1@g.us",
+          size: 8,
+          courtsStrategy: "book"
+        }]
+      ]);
+      const count = migrateAutoSizeAndMaxCourtsOptions({ activePolls });
+      assert.equal(count, 0);
     });
   });
 });
