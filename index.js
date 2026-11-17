@@ -918,6 +918,7 @@ if (require.main === module) {
   // Daily message history pruning sweep (runs once per 24 hours)
   setInterval(() => {
     messageHistory.pruneAllExpiredMessages();
+    stats.pruneExpiredMatches();
   }, 24 * 60 * 60 * 1000);
 
   setInterval(() => {
