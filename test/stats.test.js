@@ -327,8 +327,10 @@ describe('stats', () => {
       const limitScores = getScores({}, { limit: limitQuery.limit });
       assert.equal(limitScores.length, 2);
 
-      // handleListScores formatting
-      const listOutput = handleListScores(null, 'today');
+      // handleListScores formatting with empty line before first listing and newline after each
+      const listOutput = handleListScores(null, 'week');
+      assert.match(listOutput, /🎾 \*Match Scores — Last 7 Days \(\d+\):\*\n\n#1/);
+      assert.match(listOutput, /#1 .+\n\n#2 /);
       assert.match(listOutput, /Alice/);
       assert.match(listOutput, /Bob/);
     });
