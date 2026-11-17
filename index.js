@@ -68,6 +68,7 @@ const ratings = require('./lib/ratings');
 const pollStore = require('./lib/pollStore');
 const namesStore = require('./lib/names');
 const messageHistory = require('./lib/messageHistory');
+const { sendMessageAndRecord } = require('./lib/botMessage');
 const recurringPollsModule = require('./lib/recurringPolls');
 const groupsConfig = require('./lib/groupsConfig');
 const courtsConfig = require('./lib/courtsConfig');
@@ -92,7 +93,8 @@ const {
   playerCommands,
   recurringCommands,
   pollCommands,
-  lineupCommands
+  lineupCommands,
+  extractQuotedContext
 } = require('./lib/commands');
 
 const { nameFor } = playerCommands;
@@ -158,6 +160,10 @@ const SYSTEM_PROMPT =
   'Only call create_poll with cancelExisting: true when a user explicitly asks to recreate or replace a bot poll with new time, day, or size. ' +
   'For fixed-spot polls, by default the user asking to create the poll is Player 1 ' +
   'unless they explicitly state they are not playing or they already have another match poll scheduled within less than 90 minutes of the resolved play time. ' +
+  'When a user message includes a quoted message in the format `[Replying to <Sender>: "<quoted text>"]`, ' +
+  'use the quoted message as direct context for what the user is asking about. ' +
+  'For example, if the user asks why they were or were not included/mentioned in a quoted reminder or announcement, ' +
+  'check whether they had voted or joined the poll before that reminder was sent (e.g., if they voted after the reminder was posted, explain that their name was not in the reminder because they had not voted yet at that time, and confirm their current status in the poll). ' +
   'When a message contains a request alongside other questions, execute the appropriate tools and answer naturally.';
 
 if (!process.env.ANTHROPIC_API_KEY) {
@@ -432,8 +438,18 @@ function buildContextBlurb(chatId) {
  * Calls Claude with tools, chat history, and live context using prompt caching.
  */
 async function callClaude(sock, chatId, sender, promptText, msg) {
+  const mePn = jidNormalizedUser(sock?.user?.id || sock?.authState?.creds?.me?.id || '');
+  const meLid = jidNormalizedUser(sock?.user?.lid || sock?.authState?.creds?.me?.lid || '');
+  const botJids = [mePn, meLid].filter(Boolean);
+
+  const quotedCtx = extractQuotedContext(msg, messageStore, botJids);
+  let effectivePrompt = promptText;
+  if (quotedCtx && quotedCtx.quotedText && !promptText.startsWith('[Replying to')) {
+    effectivePrompt = `[Replying to ${quotedCtx.quotedSenderName}: "${quotedCtx.quotedText}"]\n${promptText}`;
+  }
+
   const history = chatHistories.get(chatId) || [];
-  const userMessage = { role: 'user', content: `${sender}: ${promptText}` };
+  const userMessage = { role: 'user', content: `${sender}: ${effectivePrompt}` };
   const messages = [...history, userMessage];
 
   const systemBlocks = [
@@ -847,14 +863,10 @@ async function handleEditedMessage(sock, msg, editDetails, groupName) {
     if (typeof reply === 'object' && (reply.image || reply.video || reply.document)) {
       const captionText = reply.caption || reply.text || '';
       console.log(`[${groupName}] tenbot: [Media] ${captionText}`);
-      if (captionText) {
-        messageHistory.recordMessage(targetJid, 'tenbot', captionText, Date.now(), true);
-      }
-      await sock.sendMessage(targetJid, reply);
+      await sendMessageAndRecord(sock, targetJid, reply);
     } else if (typeof reply === 'string') {
       console.log(`[${groupName}] tenbot: ${reply}`);
-      messageHistory.recordMessage(targetJid, 'tenbot', reply, Date.now(), true);
-      await sock.sendMessage(targetJid, { text: reply });
+      await sendMessageAndRecord(sock, targetJid, { text: reply });
     }
   }
 }
@@ -888,14 +900,10 @@ async function handleMessage(sock, msg, groupName) {
     if (typeof reply === 'object' && (reply.image || reply.video || reply.document)) {
       const captionText = reply.caption || reply.text || '';
       console.log(`[${groupName}] tenbot: [Media] ${captionText}`);
-      if (captionText) {
-        messageHistory.recordMessage(remoteJid, 'tenbot', captionText, Date.now(), true);
-      }
-      await sock.sendMessage(remoteJid, reply);
+      await sendMessageAndRecord(sock, remoteJid, reply);
     } else if (typeof reply === 'string') {
       console.log(`[${groupName}] tenbot: ${reply}`);
-      messageHistory.recordMessage(remoteJid, 'tenbot', reply, Date.now(), true);
-      await sock.sendMessage(remoteJid, { text: reply });
+      await sendMessageAndRecord(sock, remoteJid, { text: reply });
     }
   }
 }
@@ -985,6 +993,7 @@ async function startBot() {
     }
   });
   botSock = sock;
+
   ratings.setBotSocket(sock);
 
   const meName = sock.user?.name || state.creds?.me?.name;
