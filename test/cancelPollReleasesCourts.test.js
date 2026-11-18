@@ -257,4 +257,186 @@ describe('cancel poll releases all booked courts', () => {
     assert.equal(cancelledReservations.length, 1);
     assert.equal(cancelledReservations[0].resId, 'RES-701');
   });
+
+  it('allows non-admin creator to cancel poll using createdBy', async () => {
+    const activePolls = new Map();
+    const context = {
+      activePolls,
+      latestPollIdByChat: new Map([[TEST_GROUP_JID, 'poll_cb_test']]),
+      persistPolls: () => {}
+    };
+
+    const pollState = {
+      id: 'poll_cb_test',
+      remoteJid: TEST_GROUP_JID,
+      title: 'Multi-time Poll',
+      status: 'active',
+      creator: null,
+      createdBy: { jid: 'user@s.whatsapp.net', name: 'User' },
+      prebookedCourts: [{ court: 'Court 8', reservationId: 'RES-801' }]
+    };
+    activePolls.set('poll_cb_test', pollState);
+
+    const reply = await handlePollCommand(
+      mockSock,
+      '!cancelpoll',
+      TEST_GROUP_JID,
+      'User',
+      'user@s.whatsapp.net',
+      null,
+      context
+    );
+
+    assert.ok(reply.includes('Poll cancelled'));
+    assert.ok(reply.includes('Court 8'));
+    assert.equal(cancelledReservations.length, 1);
+    assert.equal(cancelledReservations[0].resId, 'RES-801');
+  });
+  describe("poll selection when cancel command is issued without poll ID", () => {
+    it("selects user's active poll over an active recurring poll with no creator", async () => {
+      const activePolls = new Map();
+      const context = {
+        activePolls,
+        latestPollIdByChat: new Map([[TEST_GROUP_JID, "poll_user_newer"]]),
+        persistPolls: () => {}
+      };
+
+      // 1. Recurring poll with no creator
+      const pollRecurring = {
+        id: "poll_rec_nocreator",
+        remoteJid: TEST_GROUP_JID,
+        title: "Daily Recurring Poll",
+        status: "active",
+        isRecurring: true,
+        creator: null,
+        prebookedCourts: [{ court: "Court 1", reservationId: "RES-REC" }]
+      };
+
+      // 2. Poll created by Alice
+      const pollAlice = {
+        id: "poll_alice",
+        remoteJid: TEST_GROUP_JID,
+        title: "Alice's Match",
+        status: "active",
+        creator: { jid: "alice@s.whatsapp.net", name: "Alice" },
+        prebookedCourts: [{ court: "Court 2", reservationId: "RES-ALICE" }]
+      };
+
+      activePolls.set("poll_rec_nocreator", pollRecurring);
+      activePolls.set("poll_alice", pollAlice);
+
+      // Alice calls !cancelpoll -> should cancel Alice's poll, not the recurring poll
+      const reply = await handlePollCommand(
+        mockSock,
+        "!cancelpoll",
+        TEST_GROUP_JID,
+        "Alice",
+        "alice@s.whatsapp.net",
+        null,
+        context
+      );
+
+      assert.ok(reply.includes("Poll cancelled"));
+      assert.ok(reply.includes("Court 2"));
+      assert.equal(activePolls.has("poll_alice"), false);
+      assert.equal(activePolls.has("poll_rec_nocreator"), true);
+      assert.equal(cancelledReservations.length, 1);
+      assert.equal(cancelledReservations[0].resId, "RES-ALICE");
+    });
+
+    it("selects the most recent poll with no creator if user has no active poll, subject to admin permissions", async () => {
+      const activePolls = new Map();
+      const context = {
+        activePolls,
+        latestPollIdByChat: new Map([[TEST_GROUP_JID, "poll_rec_nocreator"]]),
+        persistPolls: () => {}
+      };
+
+      const pollRecurring = {
+        id: "poll_rec_nocreator",
+        remoteJid: TEST_GROUP_JID,
+        title: "Daily Recurring Poll",
+        status: "active",
+        isRecurring: true,
+        creator: null,
+        prebookedCourts: [{ court: "Court 3", reservationId: "RES-REC3" }]
+      };
+      activePolls.set("poll_rec_nocreator", pollRecurring);
+
+      // Non-admin user calls !cancelpoll -> blocked by permission check
+      const nonAdminReply = await handlePollCommand(
+        mockSock,
+        "!cancelpoll",
+        TEST_GROUP_JID,
+        "User",
+        "user@s.whatsapp.net",
+        null,
+        context
+      );
+      assert.ok(nonAdminReply.includes("Only the poll creator or group admins can cancel this poll"));
+      assert.equal(activePolls.has("poll_rec_nocreator"), true);
+
+      // Admin calls !cancelpoll -> cancels the recurring poll with no creator
+      const adminReply = await handlePollCommand(
+        mockSock,
+        "!cancelpoll",
+        TEST_GROUP_JID,
+        "Admin",
+        "admin@s.whatsapp.net",
+        null,
+        context
+      );
+      assert.ok(adminReply.includes("Poll cancelled"));
+      assert.ok(adminReply.includes("Court 3"));
+      assert.equal(activePolls.has("poll_rec_nocreator"), false);
+      assert.equal(cancelledReservations.some(r => r.resId === "RES-REC3"), true);
+    });
+
+    it("selects user's own poll even when a newer poll from another user is active in the same chat", async () => {
+      const activePolls = new Map();
+      const context = {
+        activePolls,
+        latestPollIdByChat: new Map([[TEST_GROUP_JID, "poll_bob"]]),
+        persistPolls: () => {}
+      };
+
+      const pollAlice = {
+        id: "poll_alice",
+        remoteJid: TEST_GROUP_JID,
+        title: "Alice Match",
+        status: "active",
+        creator: { jid: "alice@s.whatsapp.net", name: "Alice" },
+        prebookedCourts: [{ court: "Court 4", reservationId: "RES-ALICE4" }]
+      };
+
+      const pollBob = {
+        id: "poll_bob",
+        remoteJid: TEST_GROUP_JID,
+        title: "Bob Match",
+        status: "active",
+        creator: { jid: "bob@s.whatsapp.net", name: "Bob" },
+        prebookedCourts: [{ court: "Court 5", reservationId: "RES-BOB5" }]
+      };
+
+      activePolls.set("poll_alice", pollAlice);
+      activePolls.set("poll_bob", pollBob);
+
+      // Alice calls !cancelpoll -> should select Alice's poll, not Bob's newer poll
+      const reply = await handlePollCommand(
+        mockSock,
+        "!cancelpoll",
+        TEST_GROUP_JID,
+        "Alice",
+        "alice@s.whatsapp.net",
+        null,
+        context
+      );
+
+      assert.ok(reply.includes("Poll cancelled"));
+      assert.ok(reply.includes("Court 4"));
+      assert.equal(activePolls.has("poll_alice"), false);
+      assert.equal(activePolls.has("poll_bob"), true);
+      assert.equal(cancelledReservations.some(r => r.resId === "RES-ALICE4"), true);
+    });
+  });
 });
