@@ -14,10 +14,6 @@ describe('pollStore subfolder & multi-file architecture', () => {
     if (fs.existsSync(testGroupDir)) {
       fs.rmSync(testGroupDir, { recursive: true, force: true });
     }
-    const legacyFile = pollStore.getGroupFilePath(testChatId);
-    if (fs.existsSync(legacyFile)) {
-      fs.unlinkSync(legacyFile);
-    }
   });
 
   it('should save state in subfolder with recurring.json, meta.json, individual polls/*.json, and messages.jsonl', () => {
@@ -154,41 +150,22 @@ describe('pollStore subfolder & multi-file architecture', () => {
     assert.equal(reloaded.latestPollIdByChat.get(testChatId), pollId);
   });
 
-  it('should prune messages older than 14 days and migrate legacy messages.json to messages.jsonl', () => {
+  it('should prune messages older than 14 days from messages.jsonl', () => {
     const now = Date.now();
     const sixteenDaysAgoSec = Math.floor((now - 16 * 24 * 60 * 60 * 1000) / 1000);
     const twoDaysAgoSec = Math.floor((now - 2 * 24 * 60 * 60 * 1000) / 1000);
 
-    // Setup legacy messages.json with one expired message and one recent message
     fs.mkdirSync(testGroupDir, { recursive: true });
-    const legacyMessagesFile = path.join(testGroupDir, 'messages.json');
-    const legacyData = {
-      chatId: testChatId,
-      updatedAt: new Date(now).toISOString(),
-      messageStore: {
-        __type: 'Map',
-        entries: [
-          [`${testChatId}:msg_expired`, { text: 'Old alert', messageTimestamp: String(sixteenDaysAgoSec) }],
-          [`${testChatId}:msg_recent`, { text: 'Recent alert', messageTimestamp: String(twoDaysAgoSec) }]
-        ]
-      }
-    };
-    fs.writeFileSync(legacyMessagesFile, JSON.stringify(legacyData, null, 2), 'utf-8');
+    const messagesFile = path.join(testGroupDir, 'messages.jsonl');
+    const items = [
+      { key: `${testChatId}:msg_expired`, timestamp: sixteenDaysAgoSec * 1000, message: { text: 'Old alert' } },
+      { key: `${testChatId}:msg_recent`, timestamp: twoDaysAgoSec * 1000, message: { text: 'Recent alert' } }
+    ];
+    fs.writeFileSync(messagesFile, items.map(x => JSON.stringify(x)).join('\n') + '\n', 'utf-8');
 
-    // Calling loadGroup should prune the expired message, keeping only the recent one,
-    // and immediately migrate messages.json to messages.jsonl on startup without waiting for a save!
     const loaded = pollStore.loadGroup(testChatId);
     assert.equal(loaded.messageStore.has(`${testChatId}:msg_expired`), false);
     assert.equal(loaded.messageStore.has(`${testChatId}:msg_recent`), true);
-    assert.equal(fs.existsSync(legacyMessagesFile), false);
-    assert.ok(fs.existsSync(path.join(testGroupDir, 'messages.jsonl')));
-
-    const lines = fs.readFileSync(path.join(testGroupDir, 'messages.jsonl'), 'utf-8').trim().split('\n');
-    assert.equal(lines.length, 1);
-    const parsed = JSON.parse(lines[0]);
-    assert.equal(parsed.key, `${testChatId}:msg_recent`);
-    assert.ok(parsed.date);
-    assert.ok(parsed.timestamp);
   });
 
   it('should automatically delete individual poll file when poll is removed from activePolls', () => {
@@ -214,52 +191,4 @@ describe('pollStore subfolder & multi-file architecture', () => {
     assert.equal(fs.existsSync(pollFile2), false); // file should be removed!
   });
 
-  it('should auto-migrate legacy monolithic poll-state-<chatId>.json file', () => {
-    const legacyFile = pollStore.getGroupFilePath(testChatId);
-    const legacyPayload = {
-      chatId: testChatId,
-      updatedAt: new Date().toISOString(),
-      messageStore: {
-        __type: 'Map',
-        entries: [
-          [`${testChatId}:legacy_poll_1`, { pollCreationMessage: { name: 'Legacy Poll' } }]
-        ]
-      },
-      activePolls: {
-        __type: 'Map',
-        entries: [
-          ['legacy_poll_1', { remoteJid: testChatId, name: 'Legacy Poll', status: 'active', voteBuffer: { __type: 'Map', entries: [] } }]
-        ]
-      },
-      latestPollIdByChat: {
-        __type: 'Map',
-        entries: [[testChatId, 'legacy_poll_1']]
-      },
-      recurringPolls: {
-        __type: 'Map',
-        entries: [
-          ['rec_legacy', { id: 'rec_legacy', remoteJid: testChatId, matchTime: '8am' }]
-        ]
-      }
-    };
-
-    fs.writeFileSync(legacyFile, JSON.stringify(legacyPayload, null, 2), 'utf-8');
-    assert.ok(fs.existsSync(legacyFile));
-
-    // Calling loadGroup should detect legacy file, migrate it, and delete the legacy file
-    const loaded = pollStore.loadGroup(testChatId);
-    assert.equal(loaded.activePolls.size, 1);
-    assert.equal(loaded.activePolls.get('legacy_poll_1').name, 'Legacy Poll');
-    assert.equal(loaded.recurringPolls.size, 1);
-    assert.equal(loaded.recurringPolls.get('rec_legacy').matchTime, '8am');
-
-    // Legacy file should have been migrated and removed
-    assert.equal(fs.existsSync(legacyFile), false);
-
-    // New directory structure should exist
-    assert.ok(fs.existsSync(testGroupDir));
-    assert.ok(fs.existsSync(path.join(testGroupDir, 'polls', 'legacy_poll_1.json')));
-    assert.ok(fs.existsSync(path.join(testGroupDir, 'recurring.json')));
-    assert.ok(fs.existsSync(path.join(testGroupDir, 'meta.json')));
-  });
 });
