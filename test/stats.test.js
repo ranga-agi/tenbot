@@ -1,3 +1,4 @@
+const path = require('path');
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -17,7 +18,11 @@ const {
   parseDateQuery,
   formatScoresList,
   splitPlayers,
-  STATS_FILE
+  STATS_FILE,
+  SCORES_FILE,
+  AVAILABILITY_FILE,
+  AVAILABILITY_DIR,
+  SCORES_DIR
 } = require('../lib/stats');
 const {
   formatLeaderboard,
@@ -170,22 +175,42 @@ describe('stats', () => {
       assert.equal(charlie.wins, 1);
       assert.equal(charlie.losses, 2);
 
-      // Sorting order: Alice (2W) > Bob (1W, 50%) > Charlie & Dave (1W, 33%)
-      assert.equal(leaderboard[0].name, 'Alice');
-      assert.equal(leaderboard[1].name, 'Bob');
+      // Points breakdown:
+      // Alice: 16 pts (12 games won, 7 games lost)
+      assert.equal(alice.points, 16);
+      assert.equal(alice.gamesWon, 12);
+      assert.equal(alice.gamesLost, 7);
+
+      // Bob: 11 pts (9 games won, 10 games lost)
+      assert.equal(bob.points, 11);
+
+      // Charlie: 17 pts (15 games won, 16 games lost, 1 set won = 17 pts)
+      assert.equal(charlie.points, 17);
+
+      // Dave: 16 pts (14 games won, 17 games lost, 1 set won = 16 pts)
+      assert.equal(dave.points, 16);
+      assert.equal(dave.gamesLost, 17);
+
+      // Ranking: Charlie (17 pts) > Alice (16 pts, 7 lost) > Dave (16 pts, 17 lost) > Bob (11 pts)
+      // Tiebreaker: Alice and Dave both have 16 points; Alice lost fewer games (7 vs 17), so Alice ranks above Dave!
+      assert.equal(leaderboard[0].name, 'Charlie');
+      assert.equal(leaderboard[1].name, 'Alice');
+      assert.equal(leaderboard[2].name, 'Dave');
+      assert.equal(leaderboard[3].name, 'Bob');
     });
 
-    it('should format individual leaderboard cleanly with win percentages', () => {
+    it('should format individual leaderboard cleanly with points and games', () => {
       fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
 
       recordMatch('Alice & Bob', 'Charlie & Dave', '6-4');
 
       const formatted = formatLeaderboard();
       assert.match(formatted, /🏆 \*Leaderboard/);
-      assert.match(formatted, /1\. Alice — 1W 0L \(100\.0%\)/);
-      assert.match(formatted, /2\. Bob — 1W 0L \(100\.0%\)/);
-      assert.match(formatted, /3\. Charlie — 0W 1L \(0\.0%\)/);
-      assert.match(formatted, /4\. Dave — 0W 1L \(0\.0%\)/);
+      assert.match(formatted, /1\. Alice — 8 pts \(6-4 games, 1-0 sets, 1W 0L\)/);
+      assert.match(formatted, /2\. Bob — 8 pts \(6-4 games, 1-0 sets, 1W 0L\)/);
+      assert.match(formatted, /3\. Charlie — 4 pts \(4-6 games, 0-1 sets, 0W 1L\)/);
+      assert.match(formatted, /4\. Dave — 4 pts \(4-6 games, 0-1 sets, 0W 1L\)/);
+      assert.match(formatted, /_Scoring: 1 pt\/game \+ 2 pts\/set win • Tiebreaker: fewer games lost_/);
     });
 
     it('should integrate individual stats through handleScoreCommand', () => {
@@ -416,6 +441,137 @@ describe('stats', () => {
 
       const resEdit = await handleEditScore(mockSock, 'test@g.us', 'stranger@s.whatsapp.net', 'Stranger', '#1 6-0');
       assert.match(resEdit, /Only group admins or players involved/);
+    });
+  });
+
+  describe("separate storage files and group-based scoring", () => {
+    it("should store availability and scores in per-group folder structure availability/<group>.json and scores/<group>.json", () => {
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+      const GID_1 = "120363403838804497@g.us";
+      const GID_2 = "120363402559062529@g.us";
+
+      // Set availability in GID_1
+      setAvailable("PlayerOne", "Friday 9am", GID_1);
+      // Set availability in GID_2
+      setAvailable("PlayerTwo", "Saturday 10am", GID_2);
+
+      // Verify files in data/availability/
+      const file1 = path.join(AVAILABILITY_DIR, `${GID_1}.json`);
+      const file2 = path.join(AVAILABILITY_DIR, `${GID_2}.json`);
+      assert.equal(fs.existsSync(file1), true);
+      assert.equal(fs.existsSync(file2), true);
+
+      const availG1 = JSON.parse(fs.readFileSync(file1, "utf-8"));
+      const availG2 = JSON.parse(fs.readFileSync(file2, "utf-8"));
+      assert.equal(availG1.some(a => a.player === "PlayerOne"), true);
+      assert.equal(availG1.some(a => a.player === "PlayerTwo"), false);
+      assert.equal(availG2.some(a => a.player === "PlayerTwo"), true);
+      assert.equal(availG2.some(a => a.player === "PlayerOne"), false);
+
+      // Record match in GID_1
+      recordMatch("PlayerOne", "OpponentA", "6-2 6-4", { chatId: GID_1 });
+      // Record match in GID_2
+      recordMatch("PlayerTwo", "OpponentB", "6-3 6-3", { chatId: GID_2 });
+
+      // Verify files in data/scores/
+      const scoreFile1 = path.join(SCORES_DIR, `${GID_1}.json`);
+      const scoreFile2 = path.join(SCORES_DIR, `${GID_2}.json`);
+      assert.equal(fs.existsSync(scoreFile1), true);
+      assert.equal(fs.existsSync(scoreFile2), true);
+
+      const scoresG1 = JSON.parse(fs.readFileSync(scoreFile1, "utf-8"));
+      const scoresG2 = JSON.parse(fs.readFileSync(scoreFile2, "utf-8"));
+      assert.equal(scoresG1.some(m => m.winner === "PlayerOne"), true);
+      assert.equal(scoresG1.some(m => m.winner === "PlayerTwo"), false);
+      assert.equal(scoresG2.some(m => m.winner === "PlayerTwo"), true);
+      assert.equal(scoresG2.some(m => m.winner === "PlayerOne"), false);
+
+      // Clear availability for GID_1 only
+      clearAvailability(GID_1);
+      assert.deepEqual(getAvailability(GID_1), []);
+      assert.equal(getAvailability(GID_2).length, 1);
+    });
+
+    it("should store availability and scores in separate json files", () => {
+      clearAvailability();
+      setAvailable("Eve", "Sunday 8am");
+
+      assert.equal(fs.existsSync(AVAILABILITY_FILE), true);
+      const availRaw = JSON.parse(fs.readFileSync(AVAILABILITY_FILE, "utf-8"));
+      assert.equal(Array.isArray(availRaw), true);
+      assert.equal(availRaw.some(a => a.player === "Eve"), true);
+
+      recordMatch("Eve", "Frank", "6-2 6-3");
+      assert.equal(fs.existsSync(SCORES_FILE), true);
+      const scoresRaw = JSON.parse(fs.readFileSync(SCORES_FILE, "utf-8"));
+      assert.equal(Array.isArray(scoresRaw), true);
+      assert.equal(scoresRaw.some(m => m.winner === "Eve" && m.loser === "Frank"), true);
+    });
+
+    it("should calculate points and apply tiebreaker by fewer games lost", () => {
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+      // Player X wins 6-0 (1 set won, 6 games won = 6 + 2 = 8 pts, 0 games lost)
+      recordMatch("PlayerX", "Opponent1", "6-0");
+
+      // Player Y wins 6-4 (1 set won, 6 games won = 6 + 2 = 8 pts, 4 games lost)
+      recordMatch("PlayerY", "Opponent2", "6-4");
+
+      const board = getLeaderboard();
+      const pX = board.find(p => p.name === "PlayerX");
+      const pY = board.find(p => p.name === "PlayerY");
+
+      assert.equal(pX.points, 8);
+      assert.equal(pX.gamesLost, 0);
+      assert.equal(pY.points, 8);
+      assert.equal(pY.gamesLost, 4);
+
+      // PlayerX is ranked higher than PlayerY because PlayerX lost fewer games (0 vs 4)
+      const idxX = board.findIndex(p => p.name === "PlayerX");
+      const idxY = board.findIndex(p => p.name === "PlayerY");
+      assert.ok(idxX < idxY, "PlayerX (0 games lost) must rank higher than PlayerY (4 games lost) when tied at 8 points");
+    });
+
+    it("should isolate scores by group chatId", () => {
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+      const GROUP_A = "120363000000000001@g.us";
+      const GROUP_B = "120363000000000002@g.us";
+
+      recordMatch("Alpha", "Beta", "6-3", { chatId: GROUP_A });
+      recordMatch("Gamma", "Delta", "6-4", { chatId: GROUP_B });
+
+      const boardA = getLeaderboard(GROUP_A);
+      const boardB = getLeaderboard(GROUP_B);
+
+      assert.equal(boardA.some(p => p.name === "Alpha"), true);
+      assert.equal(boardA.some(p => p.name === "Gamma"), false);
+
+      assert.equal(boardB.some(p => p.name === "Gamma"), true);
+      assert.equal(boardB.some(p => p.name === "Alpha"), false);
+    });
+
+    it("should support handleScoreCommand with group parameter or targeting", () => {
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+      const TARGET_GROUP = "120363000000000003@g.us";
+      const res = handleScoreCommand("!score Serena def Venus 6-4 6-4", TARGET_GROUP);
+      assert.match(res, /Recorded: Serena def Venus/);
+
+      const board = getLeaderboard(TARGET_GROUP);
+      assert.equal(board.length, 2);
+      const serena = board.find(p => p.name === "Serena");
+      const venus = board.find(p => p.name === "Venus");
+
+      // Serena won 12 games + 2 sets (4 pts) = 16 pts
+      assert.equal(serena.points, 16);
+      assert.equal(serena.gamesWon, 12);
+      assert.equal(serena.gamesLost, 8);
+      // Venus won 8 games + 0 sets = 8 pts
+      assert.equal(venus.points, 8);
+      assert.equal(venus.gamesWon, 8);
+      assert.equal(venus.gamesLost, 12);
     });
   });
 });
