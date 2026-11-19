@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const pollCommands = require('../lib/commands/pollCommands');
+const pollCommands = require('../lib/commands/poll');
 const recurringCommands = require('../lib/commands/recurringCommands');
 const recurringPollsModule = require('../lib/recurringPolls');
 const { routeCommand, executeTool } = require('../lib/commands/index');

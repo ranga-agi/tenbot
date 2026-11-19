@@ -7,7 +7,7 @@ const {
   cancelOrDeletePoll,
   handlePollCommand,
   executePollTool
-} = require('../lib/commands/pollCommands');
+} = require('../lib/commands/poll');
 
 const TEST_GROUP_JID = '120363403838804497@g.us';
 

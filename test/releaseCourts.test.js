@@ -3,7 +3,7 @@ const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const scvcc = require('../lib/scvcc');
 const namesStore = require('../lib/names');
-const pollCommands = require('../lib/commands/pollCommands');
+const pollCommands = require('../lib/commands/poll');
 const {
   parseReleaseCourtsArgs,
   handleReleasePollCourts,

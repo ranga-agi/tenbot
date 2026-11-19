@@ -8,7 +8,7 @@ const {
   getGroupMetadataCache
 } = require('../lib/commands/groupCommands');
 const { routeCommand } = require('../lib/commands');
-const pollCommands = require('../lib/commands/pollCommands');
+const pollCommands = require('../lib/commands/poll');
 const ratings = require('../lib/ratings');
 const recurringCommands = require('../lib/commands/recurringCommands');
 

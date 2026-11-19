@@ -2,7 +2,7 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const scvcc = require('../lib/scvcc');
 const courtCommands = require('../lib/commands/courtCommands');
-const pollCommands = require('../lib/commands/pollCommands');
+const pollCommands = require('../lib/commands/poll');
 
 describe('modifyCourtBooking & Poll State Updates', () => {
   describe('parseModifyCourtCommand', () => {

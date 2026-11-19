@@ -12,7 +12,7 @@ const {
   checkPendingLineupGenerations,
   handleSetPollSlots,
   pollStatusText
-} = require('../lib/commands/pollCommands');
+} = require('../lib/commands/poll');
 const {
   extractCommonFlags,
   parseRecurringPollText,

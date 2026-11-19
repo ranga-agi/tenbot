@@ -11,7 +11,7 @@ const {
   handlePlayerCommand,
   nameFor,
   canUserManagePlayerAlias
-} = require('../lib/commands/playerCommands');
+} = require('../lib/commands/player');
 
 describe('playerCommands', () => {
   describe('parseSide', () => {

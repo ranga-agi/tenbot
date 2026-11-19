@@ -2,7 +2,7 @@ const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const { extractCommonFlags, scheduleRecurringPoll } = require('../lib/recurringPolls');
 const { migrateCourtsStrategyOptions, migrateAutoSizeAndMaxCourtsOptions } = require('../lib/pollStore');
-const { parsePollCreationText, pollStatusText, createMatchPoll } = require('../lib/commands/pollCommands');
+const { parsePollCreationText, pollStatusText, createMatchPoll } = require('../lib/commands/poll');
 
 describe('courtsStrategy option and startup migration', () => {
   describe('extractCommonFlags --courts-strategy parsing', () => {

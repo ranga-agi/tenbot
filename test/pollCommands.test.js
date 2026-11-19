@@ -66,7 +66,7 @@ const {
   normalizeCourtPreference,
   getCourtPreferenceRank,
   sortCourtsByPreference
-} = require('../lib/commands/pollCommands');
+} = require('../lib/commands/poll');
 const { sanitizeActivePolls } = require('../lib/pollStore');
 const { extractCommonFlags } = require('../lib/recurringPolls');
 
@@ -1142,7 +1142,7 @@ describe('pollCommands', () => {
       }]]);
 
       try {
-        const { processPollVoteEvent } = require('../lib/commands/pollCommands');
+        const { processPollVoteEvent } = require('../lib/commands/poll');
         await processPollVoteEvent(mockSock, { id: 'poll_slot5_test', remoteJid: '120363403838804497@g.us' }, [], {
           activePolls: new Map([['poll_slot5_test', pollState]]),
           messageStore,
@@ -2248,7 +2248,7 @@ describe('pollCommands', () => {
 
       const mockSock = { sendMessage: async () => {} };
       try {
-        const { processPollVoteEvent } = require('../lib/commands/pollCommands');
+        const { processPollVoteEvent } = require('../lib/commands/poll');
         const messageStore = new Map([['group1@g.us:poll_rebook_no', {
           messageContextInfo: { messageSecret: Buffer.from('secret') },
           pollCreationMessage: { options: Array.from({ length: 12 }, (_, i) => ({ optionName: `Player ${i+1}` })) }
@@ -3589,7 +3589,7 @@ describe('pollCommands', () => {
         }
       ];
 
-      const { processPollVoteEvent } = require('../lib/commands/pollCommands');
+      const { processPollVoteEvent } = require('../lib/commands/poll');
       await processPollVoteEvent(mockSock, { id: "poll_filled_test", remoteJid: "group1@g.us" }, updates, context);
 
       // Poll must be marked as filled
@@ -3673,7 +3673,7 @@ describe('pollCommands', () => {
         }
       ];
 
-      const { processPollVoteEvent } = require('../lib/commands/pollCommands');
+      const { processPollVoteEvent } = require('../lib/commands/poll');
       await processPollVoteEvent(mockSock, { id: "poll_auto_filled_test", remoteJid: "group1@g.us" }, updates, context);
 
       // Poll must be marked as filled

@@ -30,7 +30,7 @@ const {
   handleListScores,
   handleDeleteScore,
   handleEditScore
-} = require('../lib/commands/playerCommands');
+} = require('../lib/commands/player');
 const ratings = require('../lib/ratings');
 
 describe('stats', () => {

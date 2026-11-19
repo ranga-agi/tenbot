@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const messageHistory = require('../lib/messageHistory');
 const { sendMessageAndRecord } = require('../lib/botMessage');
 const { extractQuotedContext, isAddressedToBot } = require('../lib/commands/index');
-const pollCommands = require('../lib/commands/pollCommands');
+const pollCommands = require('../lib/commands/poll');
 const namesStore = require('../lib/names');
 
 describe('Quoted Message Context & Bot Message Recording', () => {

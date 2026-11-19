@@ -13,7 +13,7 @@ const {
 } = require('../lib/recurringPolls');
 const scvcc = require('../lib/scvcc');
 const pollTime = require('../lib/pollTime');
-const pollCommands = require('../lib/commands/pollCommands');
+const pollCommands = require('../lib/commands/poll');
 const recurringPollsModule = require('../lib/recurringPolls');
 
 describe('recurringPolls', () => {
@@ -697,7 +697,7 @@ describe('recurringPolls', () => {
     });
 
     it('should prune expired advanceBookings when cleanupExpiredPolls is called', () => {
-      const pollCommands = require('../lib/commands/pollCommands');
+      const pollCommands = require('../lib/commands/poll');
       const sched = {
         id: 'rec_cleanup_test',
         remoteJid: 'test@g.us',
@@ -1318,7 +1318,7 @@ describe('recurringPolls', () => {
     it('should create poll instance with lineupGeneration none when recurring schedule has lineupGeneration none', async () => {
       const recurringPolls = new Map();
       const activePolls = new Map();
-      const pollCommands = require('../lib/commands/pollCommands');
+      const pollCommands = require('../lib/commands/poll');
 
       await recurringPollsModule.scheduleRecurringPoll({
         recurringPolls,
