@@ -7233,4 +7233,476 @@ describe('pollCommands', () => {
     });
 
   });
+
+  describe("Split-poll combined reminders and lead-time lineups", () => {
+    const crypto = require("crypto");
+    const makeOptHash = (name) => crypto.createHash("sha256").update(name).digest();
+
+    it("checkAndSendPollReminders sends a single combined reminder for a 16-slot split poll and syncs state across parts", async () => {
+      const messagesSent = [];
+      const mockSock = {
+        user: { id: "tenbot@s.whatsapp.net" },
+        sendMessage: async (jid, content, opts) => {
+          messagesSent.push({ jid, content, opts });
+          return { key: { id: `rem_${messagesSent.length}`, remoteJid: jid } };
+        }
+      };
+
+      const now = new Date("2026-10-24T17:00:00.000Z").getTime(); // 10:00 AM PDT (not quiet hours)
+      const playAt = new Date(now + 8 * 3600 * 1000).toISOString(); // 8h remaining -> 8h bucket
+      const createdAt = new Date(now - 2 * 3600 * 1000).toISOString();
+
+      const part1Opts = Array.from({ length: 11 }, (_, i) => `Player ${i + 2}`);
+      const part2Opts = ["Player 13", "Player 14", "Player 15", "Player 16"];
+
+      const p1VoteBuffer = new Map();
+      p1VoteBuffer.set("14085550002@s.whatsapp.net", {
+        pollUpdateMessageKey: { participant: "14085550002@s.whatsapp.net" },
+        vote: { selectedOptions: [makeOptHash("Player 2")] }
+      });
+      p1VoteBuffer.set("14085550003@s.whatsapp.net", {
+        pollUpdateMessageKey: { participant: "14085550003@s.whatsapp.net" },
+        vote: { selectedOptions: [makeOptHash("Player 3")] }
+      });
+
+      const p2VoteBuffer = new Map();
+      p2VoteBuffer.set("14085550013@s.whatsapp.net", {
+        pollUpdateMessageKey: { participant: "14085550013@s.whatsapp.net" },
+        vote: { selectedOptions: [makeOptHash("Player 13")] }
+      });
+
+      const parentPollId = "session_split_16_1";
+      const part1State = {
+        remoteJid: "group1@g.us",
+        name: "🎾 Alice's poll: tomorrow 5:30pm (Part 1/2: Spots 1–12)",
+        options: part1Opts,
+        size: 12,
+        sessionTotalSize: 16,
+        type: "fixed",
+        when: "tomorrow 5:30pm",
+        playAt,
+        createdAt,
+        status: "active",
+        isManual: false,
+        creator: { name: "Alice", jid: "14085550001@s.whatsapp.net" },
+        parentPollId,
+        partNumber: 1,
+        totalParts: 2,
+        siblingPollIds: ["poll_split_p2"],
+        sentReminders: [16],
+        reminderCount: 0,
+        voteBuffer: p1VoteBuffer
+      };
+      const part2State = {
+        remoteJid: "group1@g.us",
+        name: "🎾 tomorrow 5:30pm (Part 2/2: Spots 13–16)",
+        options: part2Opts,
+        size: 4,
+        sessionTotalSize: 16,
+        type: "fixed",
+        when: "tomorrow 5:30pm",
+        playAt,
+        createdAt,
+        status: "active",
+        isManual: false,
+        creator: null,
+        parentPollId,
+        partNumber: 2,
+        totalParts: 2,
+        siblingPollIds: ["poll_split_p1"],
+        sentReminders: [16],
+        reminderCount: 0,
+        voteBuffer: p2VoteBuffer
+      };
+
+      const activePolls = new Map([
+        ["poll_split_p1", part1State],
+        ["poll_split_p2", part2State]
+      ]);
+      const messageStore = new Map([
+        ["group1@g.us:poll_split_p1", { pollCreationMessage: { name: part1State.name, options: part1Opts.map((o) => ({ optionName: o })) } }],
+        ["group1@g.us:poll_split_p2", { pollCreationMessage: { name: part2State.name, options: part2Opts.map((o) => ({ optionName: o })) } }]
+      ]);
+      const context = { activePolls, messageStore, persistPolls: () => {} };
+
+      await checkAndSendPollReminders(mockSock, context, now);
+
+      assert.equal(messagesSent.length, 1, "Should send only 1 combined reminder for split poll");
+      assert.match(messagesSent[0].content.text, /12 more players/);
+      assert.match(messagesSent[0].content.text, /16 total spots/);
+      assert.match(messagesSent[0].content.text, /Alice/);
+      assert.equal(messagesSent[0].opts.quoted.key.id, "poll_split_p1");
+      assert.ok(part1State.sentReminders.includes(8) && part2State.sentReminders.includes(8), "Both parts should mark 8h reminder as sent");
+      assert.equal(part1State.reminderCount, 1);
+      assert.equal(part2State.reminderCount, 1);
+
+      // Sweeping again immediately should not send a duplicate reminder
+      messagesSent.length = 0;
+      await checkAndSendPollReminders(mockSock, context, now + 60 * 1000);
+      assert.equal(messagesSent.length, 0);
+    });
+
+    it("sends combined reminder with all players when Part 1 is filled and Part 2 is still active", async () => {
+      const messagesSent = [];
+      const mockSock = {
+        user: { id: "tenbot@s.whatsapp.net" },
+        sendMessage: async (jid, content, opts) => {
+          messagesSent.push({ jid, content, opts });
+          return { key: { id: `rem_p1filled_${messagesSent.length}`, remoteJid: jid } };
+        }
+      };
+
+      const now = new Date("2026-10-24T19:00:00.000Z").getTime(); // 12:00 PM PDT
+      const playAt = new Date(now + 3.5 * 3600 * 1000).toISOString(); // 3.5h remaining -> 4h bucket
+      const createdAt = new Date(now - 5 * 3600 * 1000).toISOString();
+
+      const part1Opts = Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`);
+      const part2Opts = ["Player 13", "Player 14", "Player 15", "Player 16"];
+
+      const p1VoteBuffer = new Map();
+      for (let i = 1; i <= 12; i++) {
+        const jid = `140855510${String(i).padStart(2, "0")}@s.whatsapp.net`;
+        p1VoteBuffer.set(jid, {
+          pollUpdateMessageKey: { participant: jid },
+          vote: { selectedOptions: [makeOptHash(`Player ${i}`)] }
+        });
+      }
+      const p2VoteBuffer = new Map();
+      p2VoteBuffer.set("14085551013@s.whatsapp.net", {
+        pollUpdateMessageKey: { participant: "14085551013@s.whatsapp.net" },
+        vote: { selectedOptions: [makeOptHash("Player 13")] }
+      });
+
+      const parentPollId = "session_p1_filled";
+      const part1State = {
+        remoteJid: "group1@g.us",
+        name: "🎾 today 3:30pm (Part 1/2: Spots 1–12)",
+        options: part1Opts,
+        size: 12,
+        sessionTotalSize: 16,
+        type: "fixed",
+        when: "today 3:30pm",
+        playAt,
+        createdAt,
+        status: "filled",
+        isManual: false,
+        isAuto: true,
+        parentPollId,
+        partNumber: 1,
+        totalParts: 2,
+        sentReminders: [16, 8],
+        reminderCount: 2,
+        voteBuffer: p1VoteBuffer
+      };
+      const part2State = {
+        remoteJid: "group1@g.us",
+        name: "🎾 today 3:30pm (Part 2/2: Spots 13–16)",
+        options: part2Opts,
+        size: 4,
+        sessionTotalSize: 16,
+        type: "fixed",
+        when: "today 3:30pm",
+        playAt,
+        createdAt,
+        status: "active",
+        isManual: false,
+        isAuto: true,
+        parentPollId,
+        partNumber: 2,
+        totalParts: 2,
+        sentReminders: [16, 8],
+        reminderCount: 2,
+        voteBuffer: p2VoteBuffer
+      };
+
+      const activePolls = new Map([
+        ["poll_f_1", part1State],
+        ["poll_f_2", part2State]
+      ]);
+      const messageStore = new Map([
+        ["group1@g.us:poll_f_1", { pollCreationMessage: { name: part1State.name, options: part1Opts.map((o) => ({ optionName: o })) } }],
+        ["group1@g.us:poll_f_2", { pollCreationMessage: { name: part2State.name, options: part2Opts.map((o) => ({ optionName: o })) } }]
+      ]);
+      const context = { activePolls, messageStore, persistPolls: () => {} };
+
+      await checkAndSendPollReminders(mockSock, context, now);
+
+      assert.equal(messagesSent.length, 1);
+      assert.match(messagesSent[0].content.text, /3 more players/i);
+      assert.equal(messagesSent[0].opts.quoted.key.id, "poll_f_2", "Should quote the active part where open spots live");
+      assert.match(messagesSent[0].content.text, /Player \(1001\)/);
+      assert.match(messagesSent[0].content.text, /Player \(1013\)/);
+      assert.equal(part1State.reminderCount, 3);
+      assert.equal(part2State.reminderCount, 3);
+      assert.ok(part1State.sentReminders.includes(4) && part2State.sentReminders.includes(4));
+    });
+
+    it("handleTriggerReminder, handlePauseReminders, and handleResumeReminders operate on the combined logical poll", async () => {
+      const messagesSent = [];
+      const mockSock = {
+        user: { id: "tenbot@s.whatsapp.net" },
+        sendMessage: async (jid, content, opts) => {
+          messagesSent.push({ jid, content, opts });
+          return { key: { id: `man_${messagesSent.length}`, remoteJid: jid } };
+        }
+      };
+
+      const now = new Date("2026-10-24T19:00:00.000Z").getTime();
+      const playAt = new Date(now + 10 * 3600 * 1000).toISOString();
+      const parentPollId = "session_cmd_split";
+      const part1State = {
+        remoteJid: "group1@g.us",
+        name: "🎾 tomorrow 5am (Part 1/2: Spots 1–12)",
+        options: Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`),
+        size: 12,
+        sessionTotalSize: 16,
+        type: "fixed",
+        when: "tomorrow 5am",
+        playAt,
+        status: "filled",
+        parentPollId,
+        partNumber: 1,
+        totalParts: 2,
+        voteBuffer: new Map()
+      };
+      const part2State = {
+        remoteJid: "group1@g.us",
+        name: "🎾 tomorrow 5am (Part 2/2: Spots 13–16)",
+        options: ["Player 13", "Player 14", "Player 15", "Player 16"],
+        size: 4,
+        sessionTotalSize: 16,
+        type: "fixed",
+        when: "tomorrow 5am",
+        playAt,
+        status: "active",
+        parentPollId,
+        partNumber: 2,
+        totalParts: 2,
+        voteBuffer: new Map()
+      };
+
+      const activePolls = new Map([
+        ["poll_cmd_1", part1State],
+        ["poll_cmd_2", part2State]
+      ]);
+      const context = { activePolls, recurringPolls: new Map(), messageStore: new Map(), persistPolls: () => {} };
+
+      // Manual trigger without specific ID sends only 1 reminder
+      await handleTriggerReminder(mockSock, "group1@g.us", "Alice", null, context, false, now);
+      assert.equal(messagesSent.length, 1);
+
+      // Manual trigger referencing Part 1 (even though Part 1 is filled while Part 2 is active) succeeds and sends 1 reminder
+      messagesSent.length = 0;
+      const specificRes = await handleTriggerReminder(mockSock, "group1@g.us", "Alice", "poll_cmd_1", context, false, now);
+      assert.equal(specificRes, true);
+      assert.equal(messagesSent.length, 1);
+
+      // Pause/Resume targeting Part 1 syncs both parts
+      const pauseMsg = await handlePauseReminders(mockSock, "group1@g.us", "Alice", "poll_cmd_1", context);
+      assert.match(pauseMsg, /Reminders have been paused/);
+      assert.equal(part1State.reminders, false);
+      assert.equal(part2State.reminders, false);
+
+      const resumeMsg = await handleResumeReminders(mockSock, "group1@g.us", "Alice", "poll_cmd_1", context);
+      assert.match(resumeMsg, /Reminders have been resumed/);
+      assert.equal(part1State.reminders, true);
+      assert.equal(part2State.reminders, true);
+    });
+
+    it("checkPendingLineupGenerations sends a single lead-time lineup reminder for a resolved split poll", async () => {
+      const messagesSent = [];
+      const mockSock = {
+        user: { id: "tenbot@s.whatsapp.net" },
+        sendMessage: async (jid, content, opts) => {
+          messagesSent.push({ jid, content, opts });
+          return { key: { id: `lineup_rem_${messagesSent.length}`, remoteJid: jid } };
+        }
+      };
+
+      const now = Date.now();
+      const playAt = new Date(now + 15 * 60 * 1000).toISOString(); // inside default 30m lead time
+      const sampleSchedule = { sets: [{ set: 1, courts: [{ court: "Court 1", teamA: ["A", "B"], teamB: ["C", "D"] }] }] };
+      const parentPollId = "session_lineup_split";
+      const part1State = {
+        remoteJid: "group1@g.us",
+        name: "🎾 today 7pm (Part 1/2: Spots 1–12)",
+        when: "today 7pm",
+        playAt,
+        status: "resolved",
+        lineupGeneration: "filled",
+        lineupLeadTime: 30,
+        lineupReminderSent: false,
+        lastSchedule: sampleSchedule,
+        parentPollId,
+        partNumber: 1,
+        totalParts: 2,
+        voteBuffer: new Map()
+      };
+      const part2State = {
+        ...part1State,
+        name: "🎾 today 7pm (Part 2/2: Spots 13–16)",
+        partNumber: 2
+      };
+
+      const activePolls = new Map([
+        ["poll_lu_1", part1State],
+        ["poll_lu_2", part2State]
+      ]);
+      const context = { activePolls, messageStore: new Map(), persistPolls: () => {} };
+
+      const res = await checkPendingLineupGenerations(mockSock, context, now);
+      assert.equal(messagesSent.length, 1, "Should send only 1 lead-time lineup reminder across split poll parts");
+      assert.equal(res.remindedPollIds.length, 1);
+      assert.equal(part1State.lineupReminderSent, true);
+      assert.equal(part2State.lineupReminderSent, true);
+    });
+
+    it("handles 28-slot split poll with pending spillover total spots and prevents duplicate reminders after Part 3 spawns", async () => {
+      const messagesSent = [];
+      const mockSock = {
+        user: { id: "tenbot@s.whatsapp.net" },
+        sendMessage: async (jid, content, opts) => {
+          messagesSent.push({ jid, content, opts });
+          return { key: { id: `rem_28_${messagesSent.length}`, remoteJid: jid } };
+        }
+      };
+
+      const now = new Date("2026-10-24T17:00:00.000Z").getTime();
+      const playAt = new Date(now + 15.5 * 3600 * 1000).toISOString(); // 15.5h remaining -> 16h bucket
+      const createdAt = new Date(now - 2 * 3600 * 1000).toISOString();
+
+      const part1Opts = Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`);
+      const part2Opts = Array.from({ length: 12 }, (_, i) => `Player ${i + 13}`);
+      const p1VoteBuffer = new Map([
+        ["14085552001@s.whatsapp.net", { pollUpdateMessageKey: { participant: "14085552001@s.whatsapp.net" }, vote: { selectedOptions: [makeOptHash("Player 1")] } }],
+        ["14085552002@s.whatsapp.net", { pollUpdateMessageKey: { participant: "14085552002@s.whatsapp.net" }, vote: { selectedOptions: [makeOptHash("Player 2")] } }]
+      ]);
+      const p2VoteBuffer = new Map([
+        ["14085552013@s.whatsapp.net", { pollUpdateMessageKey: { participant: "14085552013@s.whatsapp.net" }, vote: { selectedOptions: [makeOptHash("Player 13")] } }]
+      ]);
+
+      const parentPollId = "session_split_28";
+      const part1State = {
+        remoteJid: "group1@g.us",
+        name: "🎾 tomorrow 8:30am (Part 1/3: Spots 1–12)",
+        options: part1Opts,
+        size: 12,
+        sessionTotalSize: 28,
+        type: "fixed",
+        when: "tomorrow 8:30am",
+        playAt,
+        createdAt,
+        status: "active",
+        isAuto: true,
+        parentPollId,
+        partNumber: 1,
+        totalParts: 3,
+        sentReminders: [],
+        reminderCount: 0,
+        voteBuffer: p1VoteBuffer
+      };
+      const part2State = {
+        ...part1State,
+        name: "🎾 tomorrow 8:30am (Part 2/3: Spots 13–24)",
+        options: part2Opts,
+        partNumber: 2,
+        sentReminders: [],
+        voteBuffer: p2VoteBuffer
+      };
+
+      const activePolls = new Map([
+        ["poll_28_1", part1State],
+        ["poll_28_2", part2State]
+      ]);
+      const messageStore = new Map([
+        ["group1@g.us:poll_28_1", { pollCreationMessage: { name: part1State.name, options: part1Opts.map((o) => ({ optionName: o })) } }],
+        ["group1@g.us:poll_28_2", { pollCreationMessage: { name: part2State.name, options: part2Opts.map((o) => ({ optionName: o })) } }]
+      ]);
+      const context = { activePolls, messageStore, persistPolls: () => {} };
+
+      await checkAndSendPollReminders(mockSock, context, now);
+      assert.equal(messagesSent.length, 1);
+      assert.match(messagesSent[0].content.text, /25 more players.*\(28 total spots\)/i);
+
+      // Simulate Parts 1 & 2 filling up and spillover Part 3 inheriting synced sentReminders
+      part1State.status = "filled";
+      part2State.status = "filled";
+      activePolls.set("poll_28_3", {
+        ...part2State,
+        name: "🎾 tomorrow 8:30am (Part 3/3: Spots 25–28)",
+        options: ["Player 25", "Player 26", "Player 27", "Player 28"],
+        size: 4,
+        status: "active",
+        partNumber: 3,
+        sentReminders: [...part2State.sentReminders],
+        voteBuffer: new Map()
+      });
+
+      messagesSent.length = 0;
+      await checkAndSendPollReminders(mockSock, context, now + 10 * 60 * 1000);
+      assert.equal(messagesSent.length, 0, "Spillover Part 3 must not re-trigger already sent 16h reminder");
+    });
+
+    it("checkPendingLineupGenerations fallback mode combines all split poll parts into one matchup draw", async () => {
+      const messagesSent = [];
+      const mockSock = {
+        user: { id: "tenbot@s.whatsapp.net" },
+        sendMessage: async (jid, content, opts) => {
+          messagesSent.push({ jid, content, opts });
+          return { key: { id: `fallback_lu_${messagesSent.length}`, remoteJid: jid } };
+        }
+      };
+
+      const now = Date.now();
+      const playAt = new Date(now + 15 * 60 * 1000).toISOString();
+      const parentPollId = "session_fallback_16";
+      const part1Opts = Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`);
+      const part2Opts = ["Player 13", "Player 14", "Player 15", "Player 16"];
+      const p1Players = Array.from({ length: 12 }, (_, i) => `P${i + 1}`);
+      const p2Players = ["P13", "P14", "P15", "P16"];
+
+      const part1State = {
+        remoteJid: "group1@g.us",
+        name: "🎾 today 7pm (Part 1/2: Spots 1–12)",
+        options: part1Opts,
+        size: 12,
+        sessionTotalSize: 16,
+        type: "fixed",
+        when: "today 7pm",
+        playAt,
+        status: "filled",
+        lineupGeneration: "fallback",
+        lineupLeadTime: 30,
+        lineupReminderSent: false,
+        lastPlayers: p1Players,
+        parentPollId,
+        partNumber: 1,
+        totalParts: 2,
+        voteBuffer: new Map()
+      };
+      const part2State = {
+        ...part1State,
+        name: "🎾 today 7pm (Part 2/2: Spots 13–16)",
+        options: part2Opts,
+        size: 4,
+        lastPlayers: p2Players,
+        partNumber: 2
+      };
+
+      const activePolls = new Map([
+        ["poll_fb_1", part1State],
+        ["poll_fb_2", part2State]
+      ]);
+      const context = { activePolls, messageStore: new Map(), persistPolls: () => {} };
+
+      const res = await checkPendingLineupGenerations(mockSock, context, now);
+      assert.equal(messagesSent.length, 1, "Fallback mode should generate and send 1 combined matchup schedule");
+      assert.equal(res.generatedPollIds.length, 1);
+      assert.equal(part1State.status, "resolved");
+      assert.equal(part2State.status, "resolved");
+      assert.equal(part1State.lineupReminderSent, true);
+      assert.equal(part2State.lineupReminderSent, true);
+      assert.equal(part1State.lastPlayers.length, 16);
+    });
+  });
 });
