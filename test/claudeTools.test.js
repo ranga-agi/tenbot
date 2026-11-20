@@ -7,7 +7,7 @@ describe('claudeTools', () => {
     assert(Array.isArray(CLAUDE_TOOLS));
     assert(Array.isArray(CACHED_CLAUDE_TOOLS));
     assert.equal(CLAUDE_TOOLS.length, CACHED_CLAUDE_TOOLS.length);
-    assert.equal(CLAUDE_TOOLS.length, 46);
+    assert.equal(CLAUDE_TOOLS.length, 47);
   });
 
   it('should ensure each tool has name, description, and valid input_schema', () => {
@@ -59,6 +59,7 @@ describe('claudeTools', () => {
       'schedule_recurring_poll',
       'modify_recurring_poll',
       'list_recurring_polls',
+      'get_recurring_advance_bookings',
       'limit_poll_slots',
       'modify_poll_instance',
       'pause_recurring_poll',

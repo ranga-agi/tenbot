@@ -732,11 +732,31 @@ describe('Custom Poll Title Support', () => {
         title: 'Friday Mixer',
         enabled: true
       });
+      recurringPolls.set('rec_2', {
+        id: 'rec_2',
+        remoteJid: '120363402559062529@g.us',
+        daysDisplay: 'Sun',
+        matchDisplay: '9 AM',
+        postDisplay: '8 AM',
+        title: 'Sunday Social',
+        enabled: true
+      });
       activePolls.set('poll_t1', {
         remoteJid: '120363402559062529@g.us',
         name: '🎾 Twilight Cup — Tomorrow 7pm (4 slots / 4)',
         title: 'Twilight Cup',
         when: 'Tomorrow 7pm',
+        options: ['Player 1', 'Player 2', 'Player 3', 'Player 4'],
+        status: 'active',
+        voteBuffer: new Map()
+      });
+      activePolls.set('poll_rec_inst', {
+        remoteJid: '120363402559062529@g.us',
+        scheduleId: 'rec_1',
+        name: '🎾 Friday Mixer',
+        title: 'Friday Mixer Special',
+        when: 'Fri 7pm',
+        size: 4,
         options: ['Player 1', 'Player 2', 'Player 3', 'Player 4'],
         status: 'active',
         voteBuffer: new Map()
@@ -753,13 +773,29 @@ describe('Custom Poll Title Support', () => {
       });
       assert.match(statusAll, /Title: Twilight Cup/);
       assert.match(statusAll, /`rec_1` \[Friday Mixer\]/);
+      assert.match(statusAll, /Poll `poll_rec_inst` "Friday Mixer Special" \(Fri 7pm\) — Status: active/);
+
+      const statusActive = pollCommands.pollStatusText('120363402559062529@g.us', { activeOnly: true }, {
+        activePolls,
+        recurringPolls,
+        messageStore: new Map()
+      });
+      assert.match(statusActive, /Title: Twilight Cup/);
+      assert.match(statusActive, /Title: Friday Mixer Special/);
 
       const statusSched = pollCommands.pollStatusText('120363402559062529@g.us', { targetId: 'rec_1' }, {
         activePolls,
         recurringPolls,
         messageStore: new Map()
       });
-      assert.match(statusSched, /Recurring schedule `rec_1` "Friday Mixer"/);
+      assert.match(statusSched, /Title: Friday Mixer Special/);
+
+      const statusSchedNoInst = pollCommands.pollStatusText('120363402559062529@g.us', { targetId: 'rec_2' }, {
+        activePolls,
+        recurringPolls,
+        messageStore: new Map()
+      });
+      assert.match(statusSchedNoInst, /Recurring schedule `rec_2` "Sunday Social"/);
     });
 
     it('includes custom title in formatMatchHeaderTime, getCleanLogicalPollName, reminders, and multi-time matchup headers', async () => {

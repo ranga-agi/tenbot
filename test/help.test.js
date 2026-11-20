@@ -71,6 +71,7 @@ describe('help', () => {
     assert.match(text, /`--look-around="<window>"`/);
     assert.match(text, /`--pre-allocate-slots` — Include pre-allocated court slots/);
     assert.match(text, /advance court pre-booking/i);
+    assert.match(text, /!recurringpoll advancedbookings/i);
   });
 
   it('should return detailed help for "!help setslots" including multi-time slot limits', () => {
