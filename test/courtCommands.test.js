@@ -1307,5 +1307,197 @@ describe('courtCommands', () => {
         restore();
       }
     });
+
+    it('should parse specific court arguments with poll ID while ignoring direct court booking forms', () => {
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123 Court 3'), { target: 'poll_123', mode: 'count', count: 1, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123 ct 3'), { target: 'poll_123', mode: 'count', count: 1, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123 c3'), { target: 'poll_123', mode: 'count', count: 1, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('Court 3 poll_123'), { target: 'poll_123', mode: 'count', count: 1, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('c3 poll_123'), { target: 'poll_123', mode: 'count', count: 1, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123 2 Court 3'), { target: 'poll_123', mode: 'count', count: 2, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123 Court 3 2'), { target: 'poll_123', mode: 'count', count: 2, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('2 poll_123 Court 3'), { target: 'poll_123', mode: 'count', count: 2, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123 all Court 3'), { target: 'poll_123', mode: 'all', count: null, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123 Court 3 all'), { target: 'poll_123', mode: 'all', count: null, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('--poll="Saturday 9am" Court 3'), { target: 'Saturday 9am', mode: 'count', count: 1, specificCourt: 'Court 3' });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_pb_1 pb 1'), { target: 'poll_pb_1', mode: 'count', count: 1, specificCourt: 'Pickleball 1' });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_pb_1 pb 4a'), { target: 'poll_pb_1', mode: 'count', count: 1, specificCourt: 'Pickleball Ct 4A' });
+
+      // Direct booking inputs with court names must still return null
+      assert.equal(parseBookPollCourtsArgs('Court 2'), null);
+      assert.equal(parseBookPollCourtsArgs('Court 2 tomorrow'), null);
+      assert.equal(parseBookPollCourtsArgs('Court 2 pb'), null);
+      assert.equal(parseBookPollCourtsArgs('Court 2 all'), null);
+      assert.equal(parseBookPollCourtsArgs('Court 2 2'), null);
+      assert.equal(parseBookPollCourtsArgs('Court 2 9am tomorrow'), null);
+    });
+
+    it('should book a specific court for a poll (even when poll already has courts) and sync split-poll siblings', async () => {
+      const restore = setupEnv();
+      const bookCalls = [];
+      scvcc.bookCourt = async (args) => {
+        bookCalls.push(args);
+        return { success: true, court: args.court || 'Court 3', date: args.when, time: '9:00 AM', reservationId: '7003', players: args.players };
+      };
+
+      const sessionId = 'session_spec_1';
+      const part1 = {
+        id: 'poll_spec_1',
+        parentPollId: sessionId,
+        partNumber: 1,
+        sessionTotalSize: 4,
+        size: 4,
+        when: 'Saturday 9am',
+        queryTime: '9:00am',
+        targetDateMDY: '11/28/2026',
+        status: 'active',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [{ court: 'Court 1', player: 'Creator', bookingType: 'auto' }],
+        advanceBookedCourts: [{ court: 'Court 1', reservationId: '7001', time: '9:00 AM' }],
+        autoBookedCourts: [{ court: 'Court 1', reservationId: '7001', time: '9:00 AM' }],
+        voteBuffer: new Map([['v1@s.whatsapp.net', {}]])
+      };
+      const part2 = {
+        id: 'poll_spec_2',
+        parentPollId: sessionId,
+        partNumber: 2,
+        sessionTotalSize: 4,
+        size: 0,
+        when: 'Saturday 9am',
+        queryTime: '9:00am',
+        targetDateMDY: '11/28/2026',
+        status: 'active',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [{ court: 'Court 1', player: 'Creator', bookingType: 'auto' }],
+        advanceBookedCourts: [{ court: 'Court 1', reservationId: '7001', time: '9:00 AM' }],
+        autoBookedCourts: [{ court: 'Court 1', reservationId: '7001', time: '9:00 AM' }],
+        voteBuffer: new Map()
+      };
+      const context = {
+        activePolls: new Map([['poll_spec_1', part1], ['poll_spec_2', part2]]),
+        recurringPolls: new Map()
+      };
+
+      try {
+        // Already booked specific court should return an informative message without booking again
+        const alreadyRes = await handleCourtCommand(createMockSock(), `!bookcourt ${sessionId} Court 1`, testChatId, 'Creator', creatorJid, null, context);
+        assert.match(alreadyRes, /Court 1\* is already booked/);
+        assert.equal(bookCalls.length, 0);
+
+        // Book specifically Court 3 for the split-poll session
+        const res = await handleCourtCommand(createMockSock(), `!bookcourt ${sessionId} c3`, testChatId, 'Creator', creatorJid, null, context);
+        assert.equal(bookCalls.length, 1);
+        assert.equal(bookCalls[0].court, 'Court 3');
+        assert.equal(bookCalls[0].strictCourt, true);
+        assert.ok(bookCalls[0].excludeCourts.includes('Court 1'));
+        assert.equal(part1.prebookedCourts.length, 2);
+        assert.equal(part2.prebookedCourts.length, 2);
+        assert.ok(part1.prebookedCourts.some((c) => c.court === 'Court 3'));
+        assert.ok(part2.prebookedCourts.some((c) => c.court === 'Court 3'));
+        assert.equal(part1.sessionTotalSize, 8);
+        assert.equal(part2.sessionTotalSize, 8);
+        assert.match(res, /Court 3/);
+        assert.match(res, /Total courts for poll: \*2\* \(8 player spots\)/);
+
+        // Also test via executeCourtTool('book_court', { pollId, court: 'ct 5' })
+        const toolRes = await executeCourtTool(createMockSock(), 'book_court', { pollId: sessionId, court: 'ct 5' }, 'Admin', testChatId, adminJid, context);
+        assert.equal(bookCalls.length, 2);
+        assert.equal(bookCalls[1].court, 'Court 5');
+        assert.equal(bookCalls[1].strictCourt, true);
+        assert.match(toolRes, /Court 5/);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should fail cleanly without falling back to another court when requested specific court is unavailable', async () => {
+      const restore = setupEnv();
+      const origCheck = scvcc.checkCourtAvailability;
+      let availCalls = 0;
+      scvcc.checkCourtAvailability = async () => {
+        availCalls++;
+        return {
+          success: true,
+          slots: [{
+            time: '9:00 AM',
+            courts: [
+              { court: 'Court 1', status: 'booked', availableMinutes: 0, resourceId: '1', prebookedPlayers: ['Alice'] },
+              { court: 'Court 2', status: 'available', availableMinutes: 90, resourceId: '2' },
+              { court: 'Court 3', status: 'booked', availableMinutes: 0, resourceId: '3', prebookedPlayers: ['Bob'] }
+            ]
+          }]
+        };
+      };
+
+      const pollId = 'poll_strict_1';
+      const pollState = {
+        id: pollId,
+        when: 'Saturday 9am',
+        queryTime: '9:00am',
+        targetDateMDY: '11/28/2026',
+        size: 4,
+        status: 'active',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [{ court: 'Court 1' }],
+        voteBuffer: new Map()
+      };
+      const context = { activePolls: new Map([[pollId, pollState]]), recurringPolls: new Map() };
+
+      try {
+        const res = await handleCourtCommand(createMockSock(), `!bookcourt ${pollId} Court 3`, testChatId, 'Creator', creatorJid, null, context);
+        assert.match(res, /Could not book \*Court 3\*/);
+        assert.match(res, /Court 3\* is not available/);
+        // Must NOT fall back to Court 2
+        assert.equal(pollState.prebookedCourts.length, 1);
+        assert.equal(availCalls, 1, 'Should not retry unavailable court with different player combos');
+      } finally {
+        scvcc.checkCourtAvailability = origCheck;
+        restore();
+      }
+    });
+
+    it('should target specific court first when booking multiple additional courts for a poll', async () => {
+      const restore = setupEnv();
+      const bookCalls = [];
+      scvcc.bookCourt = async (args) => {
+        bookCalls.push(args);
+        const c = args.court || 'Court 5';
+        return { success: true, court: c, date: args.when, time: '6:00 PM', reservationId: `800${bookCalls.length}` };
+      };
+
+      const pollId = 'poll_multi_spec_1';
+      const pollState = {
+        id: pollId,
+        when: 'Friday 6pm',
+        queryTime: '6:00pm',
+        targetDateMDY: '11/27/2026',
+        size: 4,
+        status: 'active',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [{ court: 'Court 1' }],
+        voteBuffer: new Map()
+      };
+      const context = { activePolls: new Map([[pollId, pollState]]), recurringPolls: new Map() };
+
+      try {
+        const res = await handleCourtCommand(createMockSock(), `!bookcourt ${pollId} 2 Court 3`, testChatId, 'Creator', creatorJid, null, context);
+        assert.equal(bookCalls.length, 2);
+        assert.equal(bookCalls[0].court, 'Court 3');
+        assert.equal(bookCalls[0].strictCourt, true);
+        assert.equal(bookCalls[1].court, null);
+        assert.equal(bookCalls[1].strictCourt, false);
+        assert.ok(bookCalls[1].excludeCourts.includes('Court 3'));
+        assert.equal(pollState.prebookedCourts.length, 3);
+        assert.match(res, /Booked 2 additional court\(s\)/);
+        assert.match(res, /Court 3/);
+        assert.match(res, /Court 5/);
+      } finally {
+        restore();
+      }
+    });
   });
 });
