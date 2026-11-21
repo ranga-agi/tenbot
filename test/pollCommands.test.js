@@ -8046,6 +8046,155 @@ describe('pollCommands', () => {
     });
   });
 
+  describe("Split-poll grouped status display (!activepolls / pollStatusText)", () => {
+    const crypto = require("crypto");
+    function makeOptHash(name) {
+      return crypto.createHash("sha256").update(name).digest();
+    }
+
+    it("groups 16-slot split polls (12 + 4, 9 + 4 = 13 votes) into one logical Poll Session block in !activepolls", async () => {
+      const now = new Date("2026-10-24T17:00:00.000Z").getTime();
+      const playAt = new Date(now + 10 * 3600 * 1000).toISOString();
+      const createdAt = new Date(now - 2 * 3600 * 1000).toISOString();
+
+      const part1Opts = Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`);
+      const part2Opts = Array.from({ length: 4 }, (_, i) => `Player ${13 + i}`);
+      const part1Votes = new Map();
+      for (let i = 1; i <= 9; i++) {
+        part1Votes.set(`v${i}@s.whatsapp.net`, {
+          pollUpdateMessageKey: { remoteJid: "group1@g.us", participant: `v${i}@s.whatsapp.net` },
+          vote: { selectedOptions: [makeOptHash(`Player ${i}`)] }
+        });
+      }
+      const part2Votes = new Map();
+      for (let i = 10; i <= 13; i++) {
+        part2Votes.set(`v${i}@s.whatsapp.net`, {
+          pollUpdateMessageKey: { remoteJid: "group1@g.us", participant: `v${i}@s.whatsapp.net` },
+          vote: { selectedOptions: [makeOptHash(`Player ${i + 3}`)] }
+        });
+      }
+
+      const courts = [
+        { court: "Court 1", bookingType: "auto" },
+        { court: "Court 2", bookingType: "auto" },
+        { court: "Court 3", bookingType: "auto" },
+        { court: "Court 4", bookingType: "auto" }
+      ];
+      const advCourts = [
+        { court: "Court 1", reservationId: "res-1" },
+        { court: "Court 2", reservationId: "res-2" },
+        { court: "Court 3", reservationId: "res-3" },
+        { court: "Court 4", reservationId: "res-4" }
+      ];
+
+      const part1 = {
+        remoteJid: "group1@g.us",
+        scheduleId: "rec_fri7pm",
+        name: "🎾 Friday 7pm (Part 1/2: Spots 1–12)",
+        options: part1Opts,
+        size: 12,
+        type: "fixed",
+        when: "Friday 7pm",
+        playAt,
+        createdAt,
+        status: "active",
+        isAuto: true,
+        isRecurring: true,
+        courtsStrategy: "book",
+        slotCheck: true,
+        lineupGeneration: "filled",
+        prebookedCourts: courts,
+        advanceBookedCourts: advCourts,
+        autoBookedCourts: advCourts,
+        parentPollId: "session_fri7pm",
+        partNumber: 1,
+        totalParts: 2,
+        startSlot: 1,
+        endSlot: 12,
+        partSize: 12,
+        sessionTotalSize: 16,
+        sentReminders: [64, 32],
+        reminderCount: 2,
+        voteBuffer: part1Votes
+      };
+      const part2 = {
+        ...part1,
+        name: "🎾 Friday 7pm (Part 2/2: Spots 13–16)",
+        options: part2Opts,
+        size: 4,
+        status: "filled",
+        partNumber: 2,
+        startSlot: 13,
+        endSlot: 16,
+        partSize: 4,
+        voteBuffer: part2Votes
+      };
+
+      const activePolls = new Map([
+        ["poll_part1", part1],
+        ["poll_part2", part2]
+      ]);
+      const recurringPolls = new Map([
+        ["rec_fri7pm", { id: "rec_fri7pm", remoteJid: "group1@g.us", daysDisplay: "Fri", matchDisplay: "7 PM", postDisplay: "8 AM", enabled: true }]
+      ]);
+      const messageStore = new Map([
+        ["group1@g.us:poll_part1", { pollCreationMessage: { options: part1Opts.map((o) => ({ optionName: o })) } }],
+        ["group1@g.us:poll_part2", { pollCreationMessage: { options: part2Opts.map((o) => ({ optionName: o })) } }]
+      ]);
+      const context = { activePolls, recurringPolls, messageStore };
+
+      const activeOut = await handlePollCommand({}, "!activepolls", "group1@g.us", "Alice", "alice@s.whatsapp.net", {}, context);
+      assert.doesNotMatch(activeOut, /\n---\n/, "Split parts must be grouped into a single section");
+      assert.match(activeOut, /Poll Session session_fri7pm \(Friday 7pm\): 16 spots \(Doubles, split into 2 polls\)\./);
+      assert.match(activeOut, /Status: active \(1\/2 parts filled\)/);
+      assert.match(activeOut, /Slots filled: 13\/16/);
+      assert.match(activeOut, /Currently playing \(13\):/);
+      assert.match(activeOut, /Split Poll Parts \(2\):/);
+      assert.match(activeOut, /Part 1\/2 \(Spots 1–12, ID: `poll_part1`\) \[active\]: 9\/12/);
+      assert.match(activeOut, /Part 2\/2 \(Spots 13–16, ID: `poll_part2`\) \[filled\]: 4\/4/);
+
+      // Recurring summary in !pollstatus also groups the split session
+      const fullOut = pollStatusText("group1@g.us", {}, context);
+      assert.match(fullOut, /Poll Session `session_fri7pm` \(Friday 7pm, 2 parts: `poll_part1`, `poll_part2`\) — Status: active/);
+
+      // Targeting a single split part ID still presents the grouped session view
+      const singleTargetOut = pollStatusText("group1@g.us", { targetId: "poll_part2" }, context);
+      assert.match(singleTargetOut, /Poll Session session_fri7pm/);
+      assert.match(singleTargetOut, /Part 1\/2/);
+      assert.match(singleTargetOut, /Part 2\/2/);
+    });
+
+    it("shows total session size vs currently open capacity for demand-driven spillover split polls", () => {
+      const now = new Date("2026-10-24T17:00:00.000Z").getTime();
+      const playAt = new Date(now + 10 * 3600 * 1000).toISOString();
+      const part1Opts = Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`);
+      const part2Opts = Array.from({ length: 12 }, (_, i) => `Player ${i + 13}`);
+      const base = {
+        remoteJid: "group1@g.us",
+        type: "fixed",
+        when: "Saturday 8am",
+        playAt,
+        status: "active",
+        parentPollId: "session_28_spill",
+        totalParts: 3,
+        sessionTotalSize: 28,
+        voteBuffer: new Map()
+      };
+      const activePolls = new Map([
+        ["p28_1", { ...base, partNumber: 1, startSlot: 1, endSlot: 12, size: 12, options: part1Opts }],
+        ["p28_2", { ...base, partNumber: 2, startSlot: 13, endSlot: 24, size: 12, options: part2Opts }]
+      ]);
+      const messageStore = new Map([
+        ["group1@g.us:p28_1", { pollCreationMessage: { options: part1Opts.map((o) => ({ optionName: o })) } }],
+        ["group1@g.us:p28_2", { pollCreationMessage: { options: part2Opts.map((o) => ({ optionName: o })) } }]
+      ]);
+
+      const out = pollStatusText("group1@g.us", { activeOnly: true }, { activePolls, recurringPolls: new Map(), messageStore });
+      assert.match(out, /Poll Session session_28_spill \(Saturday 8am\): 28 spots \(Doubles, 2\/3 parts created\)\./);
+      assert.match(out, /Slots filled: 0\/28 \(0\/24 currently open\)/);
+    });
+  });
+
   describe("club closed detection in poll creation and on-demand booking", () => {
     it("should reject poll creation with clubClosed=true when court title matches clubClosedTitles (taking precedence over tentativeBookingTitles)", async () => {
       const origCheck = scvcc.checkCourtAvailability;
