@@ -163,6 +163,27 @@ describe('recurringCommands', () => {
             }
           }
         }],
+        ['rec_morning', {
+          id: 'rec_morning',
+          remoteJid: 'test_chat@g.us',
+          matchTime: '8:00 AM',
+          matchDisplay: '8:00 AM',
+          daysDisplay: 'Fri',
+          bookingStrategy: 'advanced',
+          bookingSchedule: '-7days 7:00AM',
+          preBookCourts: 1,
+          enabled: true,
+          advanceBookings: {
+            '2026-11-27': {
+              targetDateMDY: '11/27/2026',
+              matchTime: '8:00 AM',
+              targetCourtsCount: 1,
+              completed: true,
+              pollCreated: true,
+              autoBookedCourts: [{ court: 'Court 5', reservationId: '194500', players: ['Mia'] }]
+            }
+          }
+        }],
         ['rec_waiting', {
           id: 'rec_waiting',
           remoteJid: 'test_chat@g.us',
@@ -203,21 +224,24 @@ describe('recurringCommands', () => {
       });
 
       assert.match(res, /Recurring Advance Court Bookings/);
+      assert.match(res, /📅 \*Friday, 11\/27\/2026\*/);
+      assert.equal((res.match(/Friday, 11\/27\/2026/g) || []).length, 1);
+      assert.ok(res.indexOf('rec_morning') < res.indexOf('rec_adv1'), 'Same-day entries should sort chronologically (8:00 AM before 7:00 PM)');
+      assert.ok(res.indexOf('11/27/2026') < res.indexOf('12/04/2026'), 'Days should sort chronologically');
       assert.match(res, /rec_adv1/);
       assert.match(res, /Friday Lights/);
-      assert.match(res, /-7days 7:00AM \(2 courts\)/);
-      assert.match(res, /11\/27\/2026/);
       assert.match(res, /✅ 2\/2 courts/);
       assert.match(res, /Court 1.*\[auto booked\].*Doubles, 90 Minutes.*Alice, Bob, Charlie, Dave.*194617/);
       assert.match(res, /Court 2.*\[manual by John Doe\]/);
       assert.match(res, /Poll: 🕒 Not yet posted/);
-      assert.match(res, /12\/04\/2026/);
+      assert.match(res, /📅 \*Friday, 12\/04\/2026\*/);
       assert.match(res, /⏳ 1\/2 courts \(retrying\)/);
       assert.match(res, /Poll: ✅ Already posted/);
       assert.match(res, /Attempts: 2 retries/);
+      assert.match(res, /Waiting for Booking Trigger/i);
       assert.match(res, /rec_waiting/);
       assert.match(res, /\(Paused\)/);
-      assert.match(res, /No upcoming advance court bookings recorded yet/);
+      assert.match(res, /-7days 7:00AM \(1 court\)/);
 
       // Expired and other group entries should NOT appear
       assert.equal(res.includes('old_999'), false);

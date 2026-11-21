@@ -269,6 +269,25 @@ describe('editedMessages', () => {
       assert.equal(sentReplies.length, 1);
       assert.ok(/pong/i.test(sentReplies[0].content.text));
 
+      // 2b. Edit adding !tenbot or ~tenbot prefix
+      const editBang = {
+        key: { id: 'edit_key_bang', remoteJid: testChatId },
+        pushName: 'Alice',
+        message: { protocolMessage: { key: { id: 'orig_unaddressed_bang', remoteJid: testChatId }, type: 14, editedMessage: { conversation: '!tenbot !ping' } } }
+      };
+      await handleEditedMessage(mockSock, editBang, getEditedMessageDetails(editBang), 'Test Group');
+      assert.equal(sentReplies.length, 2);
+      assert.ok(/pong/i.test(sentReplies[1].content.text));
+
+      const editTilde = {
+        key: { id: 'edit_key_tilde', remoteJid: testChatId },
+        pushName: 'Alice',
+        message: { protocolMessage: { key: { id: 'orig_unaddressed_tilde', remoteJid: testChatId }, type: 14, editedMessage: { conversation: '~tenbot !ping' } } }
+      };
+      await handleEditedMessage(mockSock, editTilde, getEditedMessageDetails(editTilde), 'Test Group');
+      assert.equal(sentReplies.length, 3);
+      assert.ok(/pong/i.test(sentReplies[2].content.text));
+
       // 3. User edits another message using WhatsApp mention (@Tenbot) with contextInfo.mentionedJid
       const editMsgMention = {
         key: { id: 'edit_key_mention', remoteJid: testChatId },
@@ -292,8 +311,8 @@ describe('editedMessages', () => {
       const detailsMention = getEditedMessageDetails(editMsgMention);
       await handleEditedMessage(mockSock, editMsgMention, detailsMention, 'Test Group');
 
-      assert.equal(sentReplies.length, 2);
-      assert.ok(/pong/i.test(sentReplies[1].content.text));
+      assert.equal(sentReplies.length, 4);
+      assert.ok(/pong/i.test(sentReplies[3].content.text));
     });
 
             it("should deduplicate identical edit events to avoid running twice", async () => {

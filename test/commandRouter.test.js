@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { routeCommand, executeTool, isAddressedToBot } = require('../lib/commands/index');
+const { routeCommand, executeTool, isAddressedToBot, stripLeadingTrigger } = require('../lib/commands/index');
 const { handleGroupLineup, getResponse } = require('../index');
 
 describe('commandRouter', () => {
@@ -139,6 +139,34 @@ describe('commandRouter', () => {
       const res = isAddressedToBot('@tenbot create a poll for 9am', {}, botJids);
       assert.equal(res.addressed, true);
       assert.equal(res.promptText, 'create a poll for 9am');
+    });
+
+    it('should recognize leading !tenbot and ~tenbot triggers', () => {
+      const bang = isAddressedToBot('!tenbot create a poll for 9am', {}, botJids);
+      assert.equal(bang.addressed, true);
+      assert.equal(bang.promptText, 'create a poll for 9am');
+
+      const tilde = isAddressedToBot('~tenbot: who is playing today?', {}, botJids);
+      assert.equal(tilde.addressed, true);
+      assert.equal(tilde.promptText, 'who is playing today?');
+
+      const hyphen = isAddressedToBot('!Tenbot - !ping', {}, botJids);
+      assert.equal(hyphen.addressed, true);
+      assert.equal(hyphen.promptText, '!ping');
+
+      assert.equal(stripLeadingTrigger('!tenbot hello'), 'hello');
+      assert.equal(stripLeadingTrigger('~tenbot, check courts'), 'check courts');
+    });
+
+    it('should not match !tenbotfoo or mid-sentence !tenbot/~tenbot', () => {
+      const partial = isAddressedToBot('!tenbotfoo hello', {}, botJids);
+      assert.equal(partial.addressed, false);
+
+      const mid = isAddressedToBot('hey !tenbot what is up', {}, botJids);
+      assert.equal(mid.addressed, false);
+
+      const midTilde = isAddressedToBot('hey ~tenbot what is up', {}, botJids);
+      assert.equal(midTilde.addressed, false);
     });
 
     it('should recognize @botNumber prefix directly in text without mentionedJid', () => {
