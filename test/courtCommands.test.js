@@ -974,4 +974,338 @@ describe('courtCommands', () => {
       }
     });
   });
+
+  describe('!bookcourt for Poll ID', () => {
+    const groupsConfig = require('../lib/groupsConfig');
+    const { parseBookPollCourtsArgs } = require('../lib/commands/poll');
+    const testChatId = '120363999888777666@g.us';
+    const adminJid = 'admin@s.whatsapp.net';
+    const creatorJid = 'creator@s.whatsapp.net';
+    const memberJid = 'member@s.whatsapp.net';
+
+    function setupEnv() {
+      const origBookCourt = scvcc.bookCourt;
+      const origIsEnabled = groupsConfig.isCourtBookingEnabled;
+      const origGetCfg = groupsConfig.getGroupConfig;
+      const origGetPref = groupsConfig.getBookingCourtPreference;
+      const origGetPlayers = groupsConfig.getDefaultBookingPlayers;
+      const origGetNotifs = groupsConfig.getBookingNotifications;
+      const origGetNotifications = groupsConfig.getNotifications;
+      const origIsSuper = groupsConfig.isSuperAdmin;
+      const origIsAllowed = groupsConfig.isGroupAllowed;
+      const origGetGroupJid = groupsConfig.getGroupJid;
+
+      groupsConfig.isCourtBookingEnabled = () => true;
+      groupsConfig.getGroupConfig = () => ({ name: 'Sat Tennis', sport: 'tennis', courtBookingEnabled: true, maxCourts: 2 });
+      groupsConfig.getBookingCourtPreference = () => [];
+      groupsConfig.getDefaultBookingPlayers = () => ['Alice', 'Bob', 'Charlie', 'Dave'];
+      groupsConfig.getBookingNotifications = () => [];
+      groupsConfig.getNotifications = () => [];
+      groupsConfig.isSuperAdmin = () => false;
+      groupsConfig.isGroupAllowed = (jid) => jid === testChatId;
+      groupsConfig.getGroupJid = (q) => (q && q.toLowerCase() === 'sat tennis' ? testChatId : null);
+
+      return () => {
+        scvcc.bookCourt = origBookCourt;
+        groupsConfig.isCourtBookingEnabled = origIsEnabled;
+        groupsConfig.getGroupConfig = origGetCfg;
+        groupsConfig.getBookingCourtPreference = origGetPref;
+        groupsConfig.getDefaultBookingPlayers = origGetPlayers;
+        groupsConfig.getBookingNotifications = origGetNotifs;
+        groupsConfig.getNotifications = origGetNotifications;
+        groupsConfig.isSuperAdmin = origIsSuper;
+        groupsConfig.isGroupAllowed = origIsAllowed;
+        groupsConfig.getGroupJid = origGetGroupJid;
+      };
+    }
+
+    function createMockSock(sentMessages = []) {
+      return {
+        user: { id: 'tenbot@s.whatsapp.net' },
+        groupMetadata: async () => ({
+          participants: [
+            { id: adminJid, admin: 'admin' },
+            { id: creatorJid, admin: null },
+            { id: memberJid, admin: null }
+          ]
+        }),
+        sendMessage: async (jid, payload) => {
+          sentMessages.push({ jid, payload });
+          return { key: { id: `msg_${sentMessages.length}`, remoteJid: jid } };
+        }
+      };
+    }
+
+    it('should parse poll-based !bookcourt args and ignore direct court booking args', () => {
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123'), { target: 'poll_123', mode: 'votes', count: null });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123 all'), { target: 'poll_123', mode: 'all', count: null });
+      assert.deepEqual(parseBookPollCourtsArgs('all poll_123'), { target: 'poll_123', mode: 'all', count: null });
+      assert.deepEqual(parseBookPollCourtsArgs('poll_123 2'), { target: 'poll_123', mode: 'count', count: 2 });
+      assert.deepEqual(parseBookPollCourtsArgs('3 session_abc'), { target: 'session_abc', mode: 'count', count: 3 });
+      assert.deepEqual(parseBookPollCourtsArgs('rec_1 all'), { target: 'rec_1', mode: 'all', count: null });
+      assert.deepEqual(parseBookPollCourtsArgs('3EB01234567890AB'), { target: '3EB01234567890AB', mode: 'votes', count: null });
+
+      // Direct booking inputs must return null so normal !bookcourt flow handles them
+      assert.equal(parseBookPollCourtsArgs('Court 2 9am tomorrow'), null);
+      assert.equal(parseBookPollCourtsArgs('6pm tomorrow with Alice, Bob'), null);
+      assert.equal(parseBookPollCourtsArgs('tomorrow'), null);
+      assert.equal(parseBookPollCourtsArgs('all'), null);
+      assert.equal(parseBookPollCourtsArgs('2'), null);
+    });
+
+    it('should book Math.ceil(votes / 4) - booked courts when only pollId is specified', async () => {
+      const restore = setupEnv();
+      const bookCalls = [];
+      let persisted = false;
+      let nextCourtNum = 2;
+      scvcc.bookCourt = async (args) => {
+        bookCalls.push(args);
+        const c = `Court ${nextCourtNum++}`;
+        return { success: true, court: c, date: args.when, time: '9:00 AM', reservationId: `200${nextCourtNum}`, players: args.players };
+      };
+
+      const voteBuffer = new Map();
+      for (let i = 1; i <= 9; i++) {
+        voteBuffer.set(`voter${i}@s.whatsapp.net`, { vote: {} });
+      }
+      const pollId = 'poll_votes_1';
+      const pollState = {
+        id: pollId,
+        name: '🎾 Saturday 9am (12 spots) - Court 1 - Booked',
+        when: 'Saturday 9am',
+        queryTime: '9:00am',
+        targetDateMDY: '11/28/2026',
+        size: 12,
+        slotLimit: 8,
+        status: 'active',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [{ court: 'Court 1', player: 'Creator', bookingType: 'auto' }],
+        advanceBookedCourts: [{ court: 'Court 1', reservationId: '1001', time: '9:00 AM' }],
+        autoBookedCourts: [{ court: 'Court 1', reservationId: '1001', time: '9:00 AM' }],
+        releasedCourts: [{ court: 'Court 2', time: '9:00 AM' }, { court: 'Court 3', time: '9:00 AM' }],
+        voteBuffer
+      };
+      const context = {
+        activePolls: new Map([[pollId, pollState]]),
+        recurringPolls: new Map(),
+        persistPolls: () => { persisted = true; }
+      };
+
+      try {
+        const sock = createMockSock();
+        const res = await handleCourtCommand(sock, `!bookcourt ${pollId}`, testChatId, 'Creator', creatorJid, null, context);
+        // 9 votes / 4 = ceil(2.25) = 3 courts; 1 booked -> books 2 additional courts
+        assert.equal(bookCalls.length, 2);
+        assert.equal(persisted, true);
+        assert.equal(pollState.prebookedCourts.length, 3);
+        assert.equal(pollState.releasedCourts.length, 0);
+        assert.equal(pollState.slotLimit, undefined);
+        assert.match(res, /Booked 2 additional court\(s\)/);
+        assert.match(res, /Total courts for poll: \*3\* \(12 player spots\)/);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should use 2 players per court for Singles polls', async () => {
+      const restore = setupEnv();
+      const bookCalls = [];
+      scvcc.bookCourt = async (args) => {
+        bookCalls.push(args);
+        return { success: true, court: 'Court 4', date: args.when, time: '10:00 AM', reservationId: '3001', players: args.players };
+      };
+
+      const voteBuffer = new Map([
+        ['v1@s.whatsapp.net', { vote: {} }],
+        ['v2@s.whatsapp.net', { vote: {} }]
+      ]);
+      const pollId = 'poll_singles_1';
+      const pollState = {
+        id: pollId,
+        when: 'Sunday 10am',
+        queryTime: '10:00am',
+        targetDateMDY: '11/29/2026',
+        size: 2,
+        courtBookingType: 'singles',
+        status: 'active',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [],
+        voteBuffer
+      };
+      const context = { activePolls: new Map([[pollId, pollState]]), recurringPolls: new Map() };
+
+      try {
+        const res = await handleCourtCommand(createMockSock(), `!book ${pollId}`, testChatId, 'Admin', adminJid, null, context);
+        assert.equal(bookCalls.length, 1);
+        assert.equal(bookCalls[0].players.length, 2);
+        assert.match(res, /Booked 1 additional court\(s\)/);
+        assert.match(res, /2 player spots/);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should aggregate deduplicated votes across split-poll siblings and sync state across parts', async () => {
+      const restore = setupEnv();
+      const bookCalls = [];
+      let nextCourt = 3;
+      scvcc.bookCourt = async (args) => {
+        bookCalls.push(args);
+        const c = `Court ${nextCourt++}`;
+        return { success: true, court: c, date: args.when, time: '8:00 AM', reservationId: `400${nextCourt}`, players: args.players };
+      };
+
+      const vb1 = new Map();
+      for (let i = 1; i <= 9; i++) vb1.set(`p${i}@s.whatsapp.net`, { vote: {} });
+      const vb2 = new Map();
+      for (let i = 10; i <= 13; i++) vb2.set(`p${i}@s.whatsapp.net`, { vote: {} });
+
+      const sessionId = 'session_split_1';
+      const part1 = {
+        id: 'poll_part_1',
+        parentPollId: sessionId,
+        partNumber: 1,
+        sessionTotalSize: 16,
+        size: 12,
+        when: 'Saturday 8am',
+        queryTime: '8:00am',
+        targetDateMDY: '11/28/2026',
+        status: 'active',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [{ court: 'Court 1' }, { court: 'Court 2' }],
+        releasedCourts: [{ court: 'Court 3' }, { court: 'Court 4' }],
+        voteBuffer: vb1
+      };
+      const part2 = {
+        id: 'poll_part_2',
+        parentPollId: sessionId,
+        partNumber: 2,
+        sessionTotalSize: 16,
+        size: 4,
+        when: 'Saturday 8am',
+        queryTime: '8:00am',
+        targetDateMDY: '11/28/2026',
+        status: 'filled',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [{ court: 'Court 1' }, { court: 'Court 2' }],
+        releasedCourts: [{ court: 'Court 3' }, { court: 'Court 4' }],
+        voteBuffer: vb2
+      };
+      const context = {
+        activePolls: new Map([['poll_part_1', part1], ['poll_part_2', part2]]),
+        recurringPolls: new Map()
+      };
+
+      try {
+        // 9 + 4 = 13 total votes -> ceil(13/4) = 4 courts; 2 booked -> books 2 more
+        const res = await handleCourtCommand(createMockSock(), `!bookcourt ${sessionId}`, testChatId, 'Admin', adminJid, null, context);
+        assert.equal(bookCalls.length, 2);
+        assert.ok(bookCalls[0].excludeCourts.includes('Court 1'));
+        assert.ok(bookCalls[0].excludeCourts.includes('Court 2'));
+        assert.equal(part1.prebookedCourts.length, 4);
+        assert.equal(part2.prebookedCourts.length, 4);
+        assert.equal(part1.releasedCourts.length, 0);
+        assert.equal(part2.releasedCourts.length, 0);
+        assert.match(res, /Booked 2 additional court\(s\)/);
+        assert.match(res, /Total courts for poll: \*4\* \(16 player spots\)/);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should book courts up to full poll size when "all" is specified', async () => {
+      const restore = setupEnv();
+      const bookCalls = [];
+      let nextCourt = 2;
+      scvcc.bookCourt = async (args) => {
+        bookCalls.push(args);
+        return { success: true, court: `Court ${nextCourt++}`, date: args.when, time: '6:00 PM', reservationId: `500${nextCourt}` };
+      };
+
+      const pollId = 'poll_all_1';
+      const pollState = {
+        id: pollId,
+        when: 'Friday 6pm',
+        queryTime: '6:00pm',
+        targetDateMDY: '11/27/2026',
+        size: 12,
+        status: 'active',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [{ court: 'Court 1' }],
+        voteBuffer: new Map([['v1@s.whatsapp.net', { vote: {} }]])
+      };
+      const context = { activePolls: new Map([[pollId, pollState]]), recurringPolls: new Map() };
+
+      try {
+        // size 12 -> ceil(12/4) = 3 courts total; 1 booked -> books 2 more despite maxCourts=2 in groupCfg
+        const res = await handleCourtCommand(createMockSock(), `!bookcourt ${pollId} all`, testChatId, 'Creator', creatorJid, null, context);
+        assert.equal(bookCalls.length, 2);
+        assert.equal(pollState.prebookedCourts.length, 3);
+        assert.match(res, /Booked 2 additional court\(s\)/);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should book exact number of additional courts when count is specified and enforce permissions', async () => {
+      const restore = setupEnv();
+      let calls = 0;
+      scvcc.bookCourt = async (args) => {
+        calls++;
+        if (calls >= 2) return { success: false, message: 'No courts left' };
+        return { success: true, court: 'Court 5', date: args.when, time: '7:00 PM', reservationId: '6001' };
+      };
+
+      const sentMessages = [];
+      const sock = createMockSock(sentMessages);
+      const pollId = 'poll_count_1';
+      const pollState = {
+        id: pollId,
+        when: 'Thursday 7pm',
+        queryTime: '7:00pm',
+        targetDateMDY: '11/26/2026',
+        size: 4,
+        status: 'filled',
+        remoteJid: testChatId,
+        creator: { name: 'Creator', jid: creatorJid },
+        prebookedCourts: [{ court: 'Court 1' }],
+        voteBuffer: new Map([
+          ['a@s.whatsapp.net', {}],
+          ['b@s.whatsapp.net', {}],
+          ['c@s.whatsapp.net', {}],
+          ['d@s.whatsapp.net', {}]
+        ])
+      };
+      const context = { activePolls: new Map([[pollId, pollState]]), recurringPolls: new Map() };
+
+      try {
+        // Non-creator / non-admin must be rejected
+        const denied = await handleCourtCommand(sock, `!bookcourt ${pollId} 1`, testChatId, 'Member', memberJid, null, context);
+        assert.match(denied, /Only the poll creator or group admins/);
+        assert.equal(calls, 0);
+
+        // Request 2 additional via DM with --group; only 1 succeeds (partial availability warning + group notification + status flips to active)
+        const dmRes = await handleCourtCommand(sock, `!bookcourt ${pollId} 2 --group="Sat Tennis"`, 'admin_dm@s.whatsapp.net', 'Admin', adminJid, null, context);
+        assert.match(dmRes, /Booked 1 additional court\(s\)/);
+        assert.match(dmRes, /Requested \*2\* additional court\(s\), booked \*1\*/);
+        assert.equal(pollState.size, 8);
+        assert.equal(pollState.status, 'active');
+        assert.ok(sentMessages.some((m) => m.jid === testChatId && /Booked 1 additional court/.test(m.payload.text)));
+
+        // Also test via executeCourtTool('book_court', { pollId, count: 1 })
+        calls = 0;
+        scvcc.bookCourt = async (args) => ({ success: true, court: 'Court 6', date: args.when, time: '7:00 PM', reservationId: '6002' });
+        const toolRes = await executeCourtTool(sock, 'book_court', { pollId, count: 1 }, 'Admin', testChatId, adminJid, context);
+        assert.match(toolRes, /Booked 1 additional court\(s\)/);
+        assert.equal(pollState.prebookedCourts.length, 3);
+      } finally {
+        restore();
+      }
+    });
+  });
 });
