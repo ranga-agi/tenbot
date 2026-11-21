@@ -65,7 +65,9 @@ const {
   cancelOrDeletePoll,
   normalizeCourtPreference,
   getCourtPreferenceRank,
-  sortCourtsByPreference
+  sortCourtsByPreference,
+  handleStopPoll,
+  handleResumePoll
 } = require('../lib/commands/poll');
 const { sanitizeActivePolls } = require('../lib/pollStore');
 const { extractCommonFlags } = require('../lib/recurringPolls');
@@ -2409,6 +2411,143 @@ describe('pollCommands', () => {
         assert.equal(part1.prebookedCourts.length, 2);
         assert.equal(part2.prebookedCourts.length, 2);
         assert.equal(messagesSent.filter((m) => m.msg.text.includes('has been cancelled')).length, 2);
+      } finally {
+        scvcc.cancelCourtReservation = origCancel;
+      }
+    });
+
+    it('should halt automatic court releases when stopped via !stoppoll and resume them via !resumepoll', async () => {
+      const messagesSent = [];
+      const cancelledResIds = [];
+      const origCancel = scvcc.cancelCourtReservation;
+      scvcc.cancelCourtReservation = async (resId) => {
+        cancelledResIds.push(resId);
+        return { success: true };
+      };
+
+      const mockSock = {
+        sendMessage: async (jid, msg) => { messagesSent.push({ jid, msg }); },
+        groupMetadata: async () => ({ participants: [{ id: 'alice@s.whatsapp.net', admin: 'admin' }] })
+      };
+
+      const pollState = {
+        remoteJid: 'group1@g.us',
+        name: 'Stopped Poll Match',
+        createdAt: new Date(t0).toISOString(),
+        playAt: new Date(playAt).toISOString(),
+        options: Array.from({ length: 8 }, (_, i) => `Player ${i + 1}`),
+        size: 8,
+        type: 'fixed',
+        status: 'active',
+        creator: { name: 'Alice', jid: 'alice@s.whatsapp.net' },
+        prebookedCourts: [
+          { court: 'Court 1', player: 'P1' },
+          { court: 'Court 2', player: 'P2' }
+        ],
+        advanceBookedCourts: [
+          { court: 'Court 1', reservationId: 'res-1' },
+          { court: 'Court 2', reservationId: 'res-2' }
+        ],
+        courtReleaseWarningsSent: [],
+        courtReleasesDone: [],
+        invalidSlotVotesNotified: [],
+        voteBuffer: new Map([
+          ['voter1@s.whatsapp.net', { pollUpdateMessageKey: { remoteJid: 'group1@g.us', participant: 'voter1@s.whatsapp.net' }, vote: { selectedOptions: [makeOptHash('Player 1')] } }]
+        ])
+      };
+
+      const messageStore = new Map([
+        ['group1@g.us:poll_stop_test', { pollCreationMessage: { options: pollState.options.map((o) => ({ optionName: o })) } }]
+      ]);
+      const activePolls = new Map([['poll_stop_test', pollState]]);
+      const latestPollIdByChat = new Map([['group1@g.us', 'poll_stop_test']]);
+      const context = { activePolls, latestPollIdByChat, messageStore, persistPolls: () => {} };
+
+      try {
+        const stopReply = await handlePollCommand(mockSock, '!stoppoll', 'group1@g.us', 'Alice', 'alice@s.whatsapp.net', { key: { participant: 'alice@s.whatsapp.net' } }, context);
+        assert.match(stopReply, /automatic court releases are halted/i);
+        assert.equal(pollState.status, 'stopped');
+
+        // While stopped, neither warnings nor cancellations occur across 70%, 80%, 90%
+        await checkCourtReleases(mockSock, context, t0 + 415 * 60 * 1000);
+        await checkCourtReleases(mockSock, context, t0 + 420 * 60 * 1000);
+        await checkCourtReleases(mockSock, context, t0 + 480 * 60 * 1000);
+        await checkCourtReleasesForPoll(mockSock, 'poll_stop_test', pollState, context, t0 + 540 * 60 * 1000);
+
+        assert.deepEqual(cancelledResIds, []);
+        assert.equal(pollState.prebookedCourts.length, 2);
+        assert.equal(messagesSent.length, 0);
+        assert.deepEqual(pollState.courtReleasesDone, []);
+
+        // After !resumepoll, automatic court releases resume and release extra court
+        const resumeReply = await handleResumePoll(mockSock, 'group1@g.us', 'Alice', 'alice@s.whatsapp.net', null, context);
+        assert.match(resumeReply, /automatic court releases are active/i);
+        assert.equal(pollState.status, 'active');
+
+        await checkCourtReleasesForPoll(mockSock, 'poll_stop_test', pollState, context, t0 + 540 * 60 * 1000);
+        assert.deepEqual(cancelledResIds, ['res-2']);
+        assert.equal(pollState.prebookedCourts.length, 1);
+      } finally {
+        scvcc.cancelCourtReservation = origCancel;
+      }
+    });
+
+    it('should stop and resume all split sibling polls on !stoppoll / !resumepoll and halt court releases', async () => {
+      const cancelledResIds = [];
+      const origCancel = scvcc.cancelCourtReservation;
+      scvcc.cancelCourtReservation = async (resId) => {
+        cancelledResIds.push(resId);
+        return { success: true };
+      };
+
+      const mockSock = {
+        sendMessage: async () => {},
+        groupMetadata: async () => ({ participants: [{ id: 'alice@s.whatsapp.net', admin: 'admin' }] })
+      };
+
+      const makeSplit = (partNumber, size, status) => ({
+        remoteJid: 'group1@g.us',
+        name: `Split Stop Part ${partNumber}`,
+        createdAt: new Date(t0).toISOString(),
+        playAt: new Date(playAt).toISOString(),
+        options: Array.from({ length: size }, (_, i) => `Player ${i + 1}`),
+        size,
+        type: 'fixed',
+        status,
+        parentPollId: 'session_stop_split',
+        partNumber,
+        totalParts: 2,
+        creator: { name: 'Alice', jid: 'alice@s.whatsapp.net' },
+        prebookedCourts: [{ court: 'Court 1', player: 'P1' }, { court: 'Court 2', player: 'P2' }, { court: 'Court 3', player: 'P3' }, { court: 'Court 4', player: 'P4' }],
+        advanceBookedCourts: [{ court: 'Court 1', reservationId: 'res-1' }, { court: 'Court 2', reservationId: 'res-2' }, { court: 'Court 3', reservationId: 'res-3' }, { court: 'Court 4', reservationId: 'res-4' }],
+        courtReleaseWarningsSent: [],
+        courtReleasesDone: [],
+        voteBuffer: new Map()
+      });
+
+      const part1 = makeSplit(1, 12, 'filled');
+      for (let i = 1; i <= 11; i++) {
+        part1.voteBuffer.set(`v${i}@s.whatsapp.net`, { pollUpdateMessageKey: { remoteJid: 'group1@g.us', participant: `v${i}@s.whatsapp.net` }, vote: { selectedOptions: [makeOptHash(`Player ${i}`)] } });
+      }
+      const part2 = makeSplit(2, 4, 'active');
+
+      const activePolls = new Map([['poll_ss_1', part1], ['poll_ss_2', part2]]);
+      const latestPollIdByChat = new Map([['group1@g.us', 'poll_ss_1']]);
+      const context = { activePolls, latestPollIdByChat, messageStore: new Map(), persistPolls: () => {} };
+
+      try {
+        await handleStopPoll(mockSock, 'group1@g.us', 'Alice', 'alice@s.whatsapp.net', null, context);
+        assert.equal(part1.status, 'stopped');
+        assert.equal(part2.status, 'stopped');
+
+        await checkCourtReleases(mockSock, context, t0 + 540 * 60 * 1000);
+        assert.deepEqual(cancelledResIds, []);
+        assert.equal(part1.prebookedCourts.length, 4);
+        assert.equal(part2.prebookedCourts.length, 4);
+
+        await handleResumePoll(mockSock, 'group1@g.us', 'Alice', 'alice@s.whatsapp.net', null, context);
+        assert.equal(part1.status, 'filled');
+        assert.equal(part2.status, 'active');
       } finally {
         scvcc.cancelCourtReservation = origCancel;
       }
