@@ -2212,6 +2212,207 @@ describe('pollCommands', () => {
       const cancelMsg = messagesSent.find((m) => m.msg.text.includes('Court 3 and Court 2') || (m.msg.text.includes('Court 3') && m.msg.text.includes('Court 2')));
       assert.ok(cancelMsg, 'Cancellation message mentions multiple courts');
     });
+
+    it('should combine votes across split sibling polls (12 + 4 slots, 9 + 4 = 13 votes) so all 4 courts are kept', async () => {
+      const messagesSent = [];
+      const cancelledResIds = [];
+      const origCancel = scvcc.cancelCourtReservation;
+      scvcc.cancelCourtReservation = async (resId) => {
+        cancelledResIds.push(resId);
+        return { success: true };
+      };
+
+      const mockSock = {
+        sendMessage: async (jid, msg) => { messagesSent.push({ jid, msg }); }
+      };
+
+      const courts = [
+        { court: 'Court 1', player: 'P1' },
+        { court: 'Court 2', player: 'P2' },
+        { court: 'Court 3', player: 'P3' },
+        { court: 'Court 4', player: 'P4' }
+      ];
+      const advCourts = [
+        { court: 'Court 1', reservationId: 'res-1' },
+        { court: 'Court 2', reservationId: 'res-2' },
+        { court: 'Court 3', reservationId: 'res-3' },
+        { court: 'Court 4', reservationId: 'res-4' }
+      ];
+
+      const part1 = {
+        remoteJid: 'group1@g.us',
+        createdAt: new Date(t0).toISOString(),
+        playAt: new Date(playAt).toISOString(),
+        options: Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`),
+        size: 12,
+        type: 'fixed',
+        status: 'active',
+        parentPollId: 'session_16_split',
+        partNumber: 1,
+        totalParts: 2,
+        prebookedCourts: courts.map((c) => ({ ...c })),
+        advanceBookedCourts: advCourts.map((c) => ({ ...c })),
+        courtReleaseWarningsSent: [],
+        courtReleasesDone: [],
+        invalidSlotVotesNotified: [],
+        voteBuffer: new Map()
+      };
+      for (let i = 1; i <= 9; i++) {
+        part1.voteBuffer.set(`voter${i}@s.whatsapp.net`, {
+          pollUpdateMessageKey: { remoteJid: 'group1@g.us', participant: `voter${i}@s.whatsapp.net` },
+          vote: { selectedOptions: [makeOptHash(`Player ${i}`)] }
+        });
+      }
+
+      const part2 = {
+        remoteJid: 'group1@g.us',
+        createdAt: new Date(t0).toISOString(),
+        playAt: new Date(playAt).toISOString(),
+        options: Array.from({ length: 4 }, (_, i) => `Player ${13 + i}`),
+        size: 4,
+        type: 'fixed',
+        status: 'filled',
+        parentPollId: 'session_16_split',
+        partNumber: 2,
+        totalParts: 2,
+        prebookedCourts: courts.map((c) => ({ ...c })),
+        advanceBookedCourts: advCourts.map((c) => ({ ...c })),
+        courtReleaseWarningsSent: [],
+        courtReleasesDone: [],
+        invalidSlotVotesNotified: [],
+        voteBuffer: new Map()
+      };
+      for (let i = 10; i <= 13; i++) {
+        part2.voteBuffer.set(`voter${i}@s.whatsapp.net`, {
+          pollUpdateMessageKey: { remoteJid: 'group1@g.us', participant: `voter${i}@s.whatsapp.net` },
+          vote: { selectedOptions: [makeOptHash(`Player ${i + 3}`)] }
+        });
+      }
+
+      const messageStore = new Map([
+        ['group1@g.us:poll_split_1', { pollCreationMessage: { options: part1.options.map((o) => ({ optionName: o })) } }],
+        ['group1@g.us:poll_split_2', { pollCreationMessage: { options: part2.options.map((o) => ({ optionName: o })) } }]
+      ]);
+      const activePolls = new Map([
+        ['poll_split_1', part1],
+        ['poll_split_2', part2]
+      ]);
+      const context = { activePolls, messageStore, persistPolls: () => {} };
+
+      try {
+        await checkCourtReleases(mockSock, context, t0 + 415 * 60 * 1000); // 70% warn
+        await checkCourtReleases(mockSock, context, t0 + 420 * 60 * 1000); // 70%
+        await checkCourtReleases(mockSock, context, t0 + 475 * 60 * 1000); // 80% warn
+        await checkCourtReleases(mockSock, context, t0 + 480 * 60 * 1000); // 80%
+        await checkCourtReleases(mockSock, context, t0 + 540 * 60 * 1000); // 90%
+
+        assert.deepEqual(cancelledResIds, [], 'Must NOT cancel any court when 13 total voters need 4 courts');
+        assert.equal(part1.prebookedCourts.length, 4);
+        assert.equal(part2.prebookedCourts.length, 4);
+        assert.equal(messagesSent.length, 0, 'Must NOT send insufficient-player warnings or cancellation notices');
+      } finally {
+        scvcc.cancelCourtReservation = origCancel;
+      }
+    });
+
+    it('should sync released courts and milestones across split siblings and avoid duplicate cancellations', async () => {
+      const messagesSent = [];
+      const cancelledResIds = [];
+      const origCancel = scvcc.cancelCourtReservation;
+      scvcc.cancelCourtReservation = async (resId) => {
+        cancelledResIds.push(resId);
+        return { success: true };
+      };
+
+      const mockSock = {
+        sendMessage: async (jid, msg) => { messagesSent.push({ jid, msg }); }
+      };
+
+      const makePart = (partNumber, optNames) => ({
+        remoteJid: 'group1@g.us',
+        createdAt: new Date(t0).toISOString(),
+        playAt: new Date(playAt).toISOString(),
+        options: optNames,
+        size: optNames.length,
+        type: 'fixed',
+        status: 'active',
+        parentPollId: 'session_split_underfill',
+        partNumber,
+        totalParts: 2,
+        prebookedCourts: [
+          { court: 'Court 1', player: 'P1' },
+          { court: 'Court 2', player: 'P2' },
+          { court: 'Court 3', player: 'P3' },
+          { court: 'Court 4', player: 'P4' }
+        ],
+        advanceBookedCourts: [
+          { court: 'Court 1', reservationId: 'res-1' },
+          { court: 'Court 2', reservationId: 'res-2' },
+          { court: 'Court 3', reservationId: 'res-3' },
+          { court: 'Court 4', reservationId: 'res-4' }
+        ],
+        courtReleaseWarningsSent: [],
+        courtReleasesDone: [],
+        invalidSlotVotesNotified: [],
+        voteBuffer: new Map()
+      });
+
+      const part1 = makePart(1, Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`));
+      const part2 = makePart(2, Array.from({ length: 4 }, (_, i) => `Player ${13 + i}`));
+
+      // 5 voters in part 1 + 2 unique voters in part 2 + 1 duplicate voter (voter5) in part 2 = 7 unique voters -> needs 2 courts
+      for (let i = 1; i <= 5; i++) {
+        part1.voteBuffer.set(`voter${i}@s.whatsapp.net`, {
+          pollUpdateMessageKey: { remoteJid: 'group1@g.us', participant: `voter${i}@s.whatsapp.net` },
+          vote: { selectedOptions: [makeOptHash(`Player ${i}`)] }
+        });
+      }
+      part2.voteBuffer.set('voter5@s.whatsapp.net', {
+        pollUpdateMessageKey: { remoteJid: 'group1@g.us', participant: 'voter5@s.whatsapp.net' },
+        vote: { selectedOptions: [makeOptHash('Player 13')] }
+      });
+      part2.voteBuffer.set('voter6@s.whatsapp.net', {
+        pollUpdateMessageKey: { remoteJid: 'group1@g.us', participant: 'voter6@s.whatsapp.net' },
+        vote: { selectedOptions: [makeOptHash('Player 14')] }
+      });
+      part2.voteBuffer.set('voter7@s.whatsapp.net', {
+        pollUpdateMessageKey: { remoteJid: 'group1@g.us', participant: 'voter7@s.whatsapp.net' },
+        vote: { selectedOptions: [makeOptHash('Player 15')] }
+      });
+
+      const messageStore = new Map([
+        ['group1@g.us:poll_u1', { pollCreationMessage: { options: part1.options.map((o) => ({ optionName: o })) } }],
+        ['group1@g.us:poll_u2', { pollCreationMessage: { options: part2.options.map((o) => ({ optionName: o })) } }]
+      ]);
+      const activePolls = new Map([
+        ['poll_u1', part1],
+        ['poll_u2', part2]
+      ]);
+      const context = { activePolls, messageStore, persistPolls: () => {} };
+
+      try {
+        // 70% checkpoint via checkCourtReleases -> cancels Court 4 once and syncs to part2
+        await checkCourtReleases(mockSock, context, t0 + 420 * 60 * 1000);
+        assert.deepEqual(cancelledResIds, ['res-4']);
+        assert.deepEqual(part1.prebookedCourts.map((c) => c.court), ['Court 1', 'Court 2', 'Court 3']);
+        assert.deepEqual(part2.prebookedCourts.map((c) => c.court), ['Court 1', 'Court 2', 'Court 3']);
+
+        // Direct check on part2 at 80% -> cancels Court 3 once (7 unique voters need 2 courts, NOT 1)
+        await checkCourtReleasesForPoll(mockSock, 'poll_u2', part2, context, t0 + 480 * 60 * 1000);
+        assert.deepEqual(cancelledResIds, ['res-4', 'res-3']);
+        assert.deepEqual(part1.prebookedCourts.map((c) => c.court), ['Court 1', 'Court 2']);
+        assert.deepEqual(part2.prebookedCourts.map((c) => c.court), ['Court 1', 'Court 2']);
+
+        // 90% checkpoint -> 7 unique voters need 2 courts, so Court 1 and Court 2 remain!
+        await checkCourtReleases(mockSock, context, t0 + 540 * 60 * 1000);
+        assert.deepEqual(cancelledResIds, ['res-4', 'res-3']);
+        assert.equal(part1.prebookedCourts.length, 2);
+        assert.equal(part2.prebookedCourts.length, 2);
+        assert.equal(messagesSent.filter((m) => m.msg.text.includes('has been cancelled')).length, 2);
+      } finally {
+        scvcc.cancelCourtReservation = origCancel;
+      }
+    });
   });
 
   describe('Re-booking of released courts on-demand', () => {
