@@ -854,4 +854,124 @@ describe('courtCommands', () => {
       }
     });
   });
+
+  describe("club closed detection in SCVCC availability, bookings, and bookCourt", () => {
+    const testChatId = "120363403838804497@g.us";
+    const groupsConfig = require("../lib/groupsConfig");
+
+    it("should detect club closed from court sheet blockTitle, zero durations, and prevent preceding slot override from spanning in", async () => {
+      const origGetGroupConfig = groupsConfig.getGroupConfig;
+      const origAuthFetch = scvcc.authFetch;
+      const closedHtml = `
+        <table>
+          <tr>
+            <td><div class="tscell">6:00 PM</div></td>
+            <td class="rbm_TimeSlotPanelSlotAvailable"><div class="ncCourtNum">Court 1</div></td>
+            <td class="openResSectionBlocked"><div class="ncCourtNum">Court 2</div></td>
+          </tr>
+          <tr>
+            <td><div class="tscell">6:30 PM</div></td>
+            <td class="openResSectionBlocked"><div class="ncCourtNum">Court 1</div><div class="blockTitle">Club Closed - Holiday</div></td>
+            <td class="openResSectionBlocked"><div class="ncCourtNum">Court 2</div></td>
+          </tr>
+          <tr>
+            <td><div class="tscell">7:00 PM</div></td>
+            <td class="rbm_TimeSlotPanelSlotAvailable"><div class="ncCourtNum">Court 1</div></td>
+            <td class="rbm_TimeSlotPanelSlotAvailable"><div class="ncCourtNum">Court 2</div></td>
+          </tr>
+        </table>
+      `;
+
+      groupsConfig.getGroupConfig = () => ({
+        name: "Test",
+        sport: "tennis",
+        courtBookingEnabled: true,
+        clubClosedTitles: ["/^Club Closed/i"]
+      });
+      scvcc.authFetch = async () => ({
+        ok: true,
+        text: async () => closedHtml
+      });
+
+      try {
+        // 1. Direct query at closed slot 6:30 PM
+        const closedRes = await scvcc.checkCourtAvailability({
+          when: "today",
+          time: "6:30pm",
+          chatId: testChatId
+        });
+        assert.equal(closedRes.success, true);
+        assert.equal(closedRes.clubClosed, true);
+        assert.equal(closedRes.clubClosedTitle, "Club Closed - Holiday");
+        assert.equal(closedRes.totalAvailable, 0);
+        assert.equal(closedRes.totalBlocked, 0);
+        assert.match(closedRes.message, /🚫 \*Club Closed\*: Club Closed - Holiday/);
+
+        // 2. Query at 6:00 PM should NOT extend into closed 6:30 PM slot (overrideAvailableMinutes <= 30)
+        const earlierRes = await scvcc.checkCourtAvailability({
+          when: "today",
+          time: "6:00pm",
+          chatId: testChatId
+        });
+        assert.equal(earlierRes.clubClosed, false);
+        const court2At6 = earlierRes.slots[0].courts.find((c) => c.court === "Court 2");
+        assert.equal(court2At6.overrideAvailableMinutes, 30);
+
+        // 3. getCourtBookings should tag the closed booking and closedTimes
+        const bookingsRes = await scvcc.getCourtBookings({
+          when: "today",
+          time: "6:30pm",
+          chatId: testChatId
+        });
+        assert.equal(bookingsRes.clubClosed, true);
+        assert.equal(bookingsRes.clubClosedTitle, "Club Closed - Holiday");
+        assert.ok(bookingsRes.closedTimes.some((ct) => ct.time === "6:30 PM"));
+
+        // 4. scvcc.bookCourt must refuse to book when club is closed without opening booking dialog
+        const bookRes = await scvcc.bookCourt({
+          when: "today",
+          time: "6:30pm",
+          chatId: testChatId,
+          minAvailableMinutes: 90
+        });
+        assert.equal(bookRes.success, false);
+        assert.equal(bookRes.clubClosed, true);
+        assert.equal(bookRes.clubClosedTitle, "Club Closed - Holiday");
+        assert.match(bookRes.message, /Club is closed/i);
+      } finally {
+        groupsConfig.getGroupConfig = origGetGroupConfig;
+        scvcc.authFetch = origAuthFetch;
+      }
+    });
+
+    it("should reject scvcc.bookCourt immediately on mocked club-closed availability", async () => {
+      const origCheck = scvcc.checkCourtAvailability;
+      const origGetGroupConfig = groupsConfig.getGroupConfig;
+      groupsConfig.getGroupConfig = () => ({
+        name: "Test",
+        sport: "tennis",
+        courtBookingEnabled: true,
+        clubClosedTitles: ["Holiday Closure"]
+      });
+      scvcc.checkCourtAvailability = async () => ({
+        success: true,
+        slots: [{
+          time: "10:00 AM",
+          courts: [
+            { court: "Court 1", status: "booked", blockTitle: "Holiday Closure", availableMinutes: 0 }
+          ]
+        }]
+      });
+
+      try {
+        const res = await scvcc.bookCourt({ when: "tomorrow", time: "10am", chatId: testChatId });
+        assert.equal(res.success, false);
+        assert.equal(res.clubClosed, true);
+        assert.equal(res.clubClosedTitle, "Holiday Closure");
+      } finally {
+        scvcc.checkCourtAvailability = origCheck;
+        groupsConfig.getGroupConfig = origGetGroupConfig;
+      }
+    });
+  });
 });

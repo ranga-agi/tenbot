@@ -10,6 +10,12 @@
           "Clinic",
           "Club Event",
           "/^Team Practice/i"
+        ],
+        "clubClosedTitles": [
+          "Club Closed",
+          "/^Club.*Closed/i",
+          "/Holiday\\s*(Closure|Closed)/i",
+          "/Maintenance\\s*Clos(ed|ure)/i"
         ]
       }
     ]

@@ -465,6 +465,42 @@ describe('recurringCommands', () => {
         groupsConfig.isSuperAdmin = origIsSuperAdmin;
       }
     });
+
+    it('should display club-closed advance booking entries without retrying status', () => {
+      const recurringPolls = new Map([
+        ['rec_closed1', {
+          id: 'rec_closed1',
+          remoteJid: 'test_chat@g.us',
+          matchTime: '7:00 PM',
+          matchDisplay: '7:00 PM',
+          daysDisplay: 'Thu',
+          bookingStrategy: 'advanced',
+          bookingSchedule: '-7days 7:00AM',
+          enabled: true,
+          advanceBookings: {
+            '2099-11-26': {
+              targetDateMDY: '11/26/2099',
+              matchTime: '7:00 PM',
+              targetCourtsCount: 2,
+              completed: true,
+              clubClosed: true,
+              clubClosedTitle: 'Thanksgiving Day - Club Closed',
+              retryCount: 1,
+              autoBookedCourts: [],
+              prebookedCourts: []
+            }
+          }
+        }]
+      ]);
+
+      const res = recurringPollsModule.listRecurringAdvanceBookings({
+        recurringPolls,
+        chatId: 'test_chat@g.us'
+      });
+      assert.match(res, /🚫 Club Closed \(Thanksgiving Day - Club Closed\)/);
+      assert.match(res, /Rebooking skipped — club is closed \(Thanksgiving Day - Club Closed\)/);
+      assert.equal(res.includes('(retrying)'), false);
+    });
   });
 
   describe('handleRecurringCommand', () => {

@@ -1427,4 +1427,180 @@ describe('recurringPolls', () => {
     });
   });
 
+  describe("club closed detection and preventing advance rebooking", () => {
+    it("preBookCourtsForMatch should stop immediately without retries on clubClosed and still check non-closed lookAround times", async () => {
+      const pollCommands = require("../lib/commands/poll");
+      const scvcc = require("../lib/scvcc");
+      const origBookCourt = scvcc.bookCourt;
+      const bookCalls = [];
+
+      scvcc.bookCourt = async (params) => {
+        bookCalls.push(params.time);
+        if (params.time === "6:30pm" || params.time === "6:30 PM" || params.time === "7pm" || params.time === "7:00 PM") {
+          return {
+            success: false,
+            clubClosed: true,
+            clubClosedTitle: "Club Closed - Maintenance",
+            time: params.time,
+            message: "Club is closed"
+          };
+        }
+        return {
+          success: true,
+          court: "Court 2",
+          players: params.players,
+          date: params.date,
+          time: params.time,
+          reservationId: "res_open_730",
+          message: "Booked Court 2"
+        };
+      };
+
+      try {
+        // Only closed time -> 1 call (0 retries) and clubClosed: true
+        const closedOnlyRes = await pollCommands.preBookCourtsForMatch({
+          remoteJid: "120363402559062529@g.us",
+          targetDateMDY: "11/26/2026",
+          queryTime: "7:00 PM",
+          size: 4,
+          isAdvanceBooking: true,
+          retryDelayMs: 0
+        });
+        assert.equal(bookCalls.length, 1, "Must not retry 3 times when clubClosed is true");
+        assert.equal(closedOnlyRes.clubClosed, true);
+        assert.equal(closedOnlyRes.clubClosedTitle, "Club Closed - Maintenance");
+        assert.equal(closedOnlyRes.advanceBookedCourts.length, 0);
+
+        // With lookAround (1 hour -> 6:30pm, 7pm, 7:30pm) and pre-detected closedTimes for 6:30pm
+        bookCalls.length = 0;
+        const lookAroundRes = await pollCommands.preBookCourtsForMatch({
+          remoteJid: "120363402559062529@g.us",
+          targetDateMDY: "11/26/2026",
+          queryTime: "7:00 PM",
+          lookAround: 60,
+          size: 4,
+          isAdvanceBooking: true,
+          retryDelayMs: 0,
+          closedTimes: [{ time: "6:30pm", title: "Club Closed - Maintenance" }]
+        });
+        assert.deepEqual(bookCalls, ["7pm", "7:30pm"], "Should skip pre-closed 6:30pm, try 7pm once (no retry on closed), then book 7:30pm");
+        assert.equal(lookAroundRes.clubClosed, false);
+        assert.equal(lookAroundRes.advanceBookedCourts.length, 1);
+        assert.equal(lookAroundRes.advanceBookedCourts[0].court, "Court 2");
+      } finally {
+        scvcc.bookCourt = origBookCourt;
+      }
+    });
+
+    it("checkAndExecuteAdvanceBookings should mark closed date complete and never attempt to rebook on retries or periodic checks", async () => {
+      const scvcc = require("../lib/scvcc");
+      const groupsConfig = require("../lib/groupsConfig");
+      const origCheckAvail = scvcc.checkCourtAvailability;
+      const origGetBookings = scvcc.getCourtBookings;
+      const origGetGroupConfig = groupsConfig.getGroupConfig;
+      const origRealNow = Date.now;
+
+      groupsConfig.getGroupConfig = () => ({
+        name: "Test",
+        sport: "tennis",
+        courtBookingEnabled: true,
+        bookingStrategy: "advanced",
+        bookingSchedule: "-7days 7:00AM",
+        preBookCourts: 1,
+        clubClosedTitles: ["Club Closed", "/Thanksgiving/i"]
+      });
+
+      scvcc.checkCourtAvailability = async () => ({
+        success: true,
+        slots: [{
+          time: "7:00 PM",
+          courts: [
+            { court: "Court 1", status: "booked", blockTitle: "Thanksgiving - Club Closed", availableMinutes: 0 }
+          ]
+        }]
+      });
+      scvcc.getCourtBookings = async () => ({ bookings: [] });
+
+      const recurringPolls = new Map([[
+        "rec_closed_adv",
+        {
+          id: "rec_closed_adv",
+          remoteJid: "120363403838804497@g.us",
+          size: 4,
+          matchTime: "7:00 PM",
+          matchHour: 19,
+          matchMinute: 0,
+          days: "thu",
+          daysList: [4],
+          bookingStrategy: "advanced",
+          bookingSchedule: "-7days 7:00AM",
+          preBookCourts: 1,
+          startDate: "2026-11-26",
+          enabled: true,
+          postTime: "0d 8:00 AM"
+        }
+      ]]);
+
+      let preBookCalls = 0;
+      const sentNotifications = [];
+      const preBookCourtsForMatch = async () => {
+        preBookCalls++;
+        return { advanceBookedCourts: [], prebookedCourts: [] };
+      };
+
+      try {
+        // 1. Trigger 7 days ahead (Nov 19 7:05 AM for Nov 26 Thu 7:00 PM)
+        let simulatedNow = new Date(2026, 10, 19, 7, 5, 0).getTime();
+        Date.now = () => simulatedNow;
+
+        await recurringPollsModule.checkAndExecuteAdvanceBookings({
+          sock: {},
+          recurringPolls,
+          persistPolls: () => {},
+          preBookCourtsForMatch,
+          customSanJoseParts: { year: 2026, month: 10, day: 19, hour: 7, minute: 5, weekday: "thu" },
+          sendBookingNotifications: async (_sock, _jid, msg) => { sentNotifications.push(msg); }
+        });
+
+        const entry = recurringPolls.get("rec_closed_adv").advanceBookings["2026-11-26"];
+        assert.ok(entry, "Advance booking entry should be recorded for the closed date");
+        assert.equal(entry.clubClosed, true);
+        assert.equal(entry.clubClosedTitle, "Thanksgiving - Club Closed");
+        assert.equal(entry.completed, true);
+        assert.equal(preBookCalls, 0, "Should not invoke preBookCourtsForMatch when time is already detected as closed");
+        assert.equal(sentNotifications.length, 1, "Should send a single club-closed notification");
+        assert.match(sentNotifications[0], /Club Closed/i);
+
+        // 2. Advance 15 minutes (would normally retry every 10 min) -> must NOT rebook or re-notify
+        simulatedNow += 15 * 60 * 1000;
+        await recurringPollsModule.checkAndExecuteAdvanceBookings({
+          sock: {},
+          recurringPolls,
+          persistPolls: () => {},
+          preBookCourtsForMatch,
+          customSanJoseParts: { year: 2026, month: 10, day: 19, hour: 7, minute: 20, weekday: "thu" },
+          sendBookingNotifications: async (_sock, _jid, msg) => { sentNotifications.push(msg); }
+        });
+
+        // 3. Periodic check at 9:30 AM next day -> must NOT rebook or re-notify
+        simulatedNow += 26 * 60 * 60 * 1000;
+        await recurringPollsModule.checkAndExecuteAdvanceBookings({
+          sock: {},
+          recurringPolls,
+          persistPolls: () => {},
+          preBookCourtsForMatch,
+          customSanJoseParts: { year: 2026, month: 10, day: 20, hour: 9, minute: 35, weekday: "fri" },
+          sendBookingNotifications: async (_sock, _jid, msg) => { sentNotifications.push(msg); }
+        });
+
+        assert.equal(preBookCalls, 0, "Must never attempt to rebook a club-closed date");
+        assert.equal(sentNotifications.length, 1, "Must not send duplicate notifications");
+      } finally {
+        Date.now = origRealNow;
+        scvcc.checkCourtAvailability = origCheckAvail;
+        scvcc.getCourtBookings = origGetBookings;
+        groupsConfig.getGroupConfig = origGetGroupConfig;
+      }
+    });
+  });
 });

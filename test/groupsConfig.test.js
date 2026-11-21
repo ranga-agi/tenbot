@@ -11,6 +11,8 @@ const {
   resumeCourtBookings,
   isTentativeBookingTitle,
   matchesTentativePattern,
+  getClubClosedTitles,
+  isClubClosedTitle,
   getGroupConfig,
   updateGroupConfig,
   formatGroupConfig,
@@ -232,6 +234,52 @@ describe('groupsConfig', () => {
 
       const allFormatted = formatAllGroupsConfig();
       assert.match(allFormatted, /• Reminder Quiet Hours: 10:00 PM – 7:00 AM/);
+    });
+  });
+
+  describe("clubClosedTitles in groupsConfig", () => {
+    it("should support configuring, updating, clearing, and formatting clubClosedTitles", () => {
+      const origConfig = JSON.parse(JSON.stringify(loadRawConfig() || {}));
+      try {
+        const updated = updateGroupConfig("Bot-testing", {
+          clubClosedTitles: "Club Closed, /^Thanksgiving/i"
+        });
+        assert.ok(updated);
+        assert.deepEqual(updated.clubClosedTitles, ["Club Closed", "/^Thanksgiving/i"]);
+
+        const cfg = getGroupConfig("Bot-testing");
+        assert.deepEqual(cfg.clubClosedTitles, ["Club Closed", "/^Thanksgiving/i"]);
+        assert.deepEqual(getClubClosedTitles("Bot-testing"), ["Club Closed", "/^Thanksgiving/i"]);
+
+        const formatted = formatGroupConfig("Bot-testing");
+        assert.match(formatted, /\*Club Closed Booking Titles:\* Club Closed, \/\^Thanksgiving\/i/);
+
+        assert.equal(isClubClosedTitle("Club Closed - Maintenance", "Bot-testing"), true);
+        assert.equal(isClubClosedTitle("Thanksgiving Holiday", "Bot-testing"), true);
+        assert.equal(isClubClosedTitle("3.0+ Live Ball", "Bot-testing"), false);
+
+        // Clearing via "none"
+        const cleared = updateGroupConfig("Bot-testing", { clubClosedTitles: "none" });
+        assert.deepEqual(cleared.clubClosedTitles, []);
+        assert.equal(isClubClosedTitle("Club Closed - Maintenance", "Bot-testing"), false);
+      } finally {
+        saveRawConfig(origConfig);
+      }
+    });
+
+    it("should support alias keys like closedBookingTitles in getGroupConfig mock", () => {
+      const groupsConfig = require("../lib/groupsConfig");
+      const origGetConfig = groupsConfig.getGroupConfig;
+      try {
+        groupsConfig.getGroupConfig = () => ({
+          closedBookingTitles: ["Holiday Closure", "/^Maintenance/i"]
+        });
+        assert.equal(isClubClosedTitle("Holiday Closure"), true);
+        assert.equal(isClubClosedTitle("Maintenance Window"), true);
+        assert.equal(isClubClosedTitle("Normal Booking"), false);
+      } finally {
+        groupsConfig.getGroupConfig = origGetConfig;
+      }
     });
   });
 });

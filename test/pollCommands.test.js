@@ -7705,4 +7705,134 @@ describe('pollCommands', () => {
       assert.equal(part1State.lastPlayers.length, 16);
     });
   });
+
+  describe("club closed detection in poll creation and on-demand booking", () => {
+    it("should reject poll creation with clubClosed=true when court title matches clubClosedTitles (taking precedence over tentativeBookingTitles)", async () => {
+      const origCheck = scvcc.checkCourtAvailability;
+      const origBookings = scvcc.getCourtBookings;
+      const origGetConfig = groupsConfig.getGroupConfig;
+
+      try {
+        groupsConfig.getGroupConfig = () => ({
+          name: "Test Group",
+          sport: "tennis",
+          courtBookingEnabled: true,
+          tentativeBookingTitles: ["Clinic", "Holiday"],
+          clubClosedTitles: ["Holiday Closure"]
+        });
+
+        scvcc.checkCourtAvailability = async () => ({
+          slots: [{
+            time: "7:00 PM",
+            courts: [
+              { court: "Court 1", status: "booked", blockTitle: "Holiday Closure" },
+              { court: "Court 2", status: "booked", blockTitle: "Holiday Closure" }
+            ]
+          }]
+        });
+        scvcc.getCourtBookings = async () => ({
+          bookings: [
+            { court: "Court 1", blockTitle: "Holiday Closure", durationMins: 90 }
+          ]
+        });
+
+        let pollSent = false;
+        const sentTexts = [];
+        const mockSock = {
+          sendMessage: async (_jid, msg) => {
+            if (msg?.poll) pollSent = true;
+            if (msg?.text) sentTexts.push(msg.text);
+            return { key: { id: "should_not_exist" } };
+          }
+        };
+        const context = { activePolls: new Map(), persistPolls: () => {} };
+
+        const res = await createMatchPoll(
+          mockSock,
+          "group1@g.us",
+          4,
+          "Tomorrow 7pm",
+          null,
+          null,
+          "Alice",
+          "alice@s.whatsapp.net",
+          false,
+          null,
+          false,
+          false,
+          false,
+          true, // checkCourts
+          false,
+          false,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          {},
+          context
+        );
+
+        assert.equal(pollSent, false, "Poll must not be posted when club is closed");
+        assert.equal(sentTexts.length, 1, "Should notify group why poll was not created");
+        assert.match(sentTexts[0], /Club is closed \(Holiday Closure\)/);
+        assert.equal(res.noCourtsAvailable, true);
+        assert.equal(res.clubClosed, true);
+        assert.equal(res.clubClosedTitle, "Holiday Closure");
+        assert.match(res.err, /Club is closed \(Holiday Closure\)/);
+      } finally {
+        scvcc.checkCourtAvailability = origCheck;
+        scvcc.getCourtBookings = origBookings;
+        groupsConfig.getGroupConfig = origGetConfig;
+      }
+    });
+
+    it("handleOnDemandCourtBooking should stop without retrying when bookCourt returns clubClosed", async () => {
+      const { handleOnDemandCourtBooking } = require("../lib/commands/poll/courts");
+      const origCheck = scvcc.checkCourtAvailability;
+      const origBook = scvcc.bookCourt;
+      const origGetConfig = groupsConfig.getGroupConfig;
+
+      let bookAttempts = 0;
+      groupsConfig.getGroupConfig = () => ({
+        name: "Test Group",
+        sport: "tennis",
+        courtBookingEnabled: true,
+        clubClosedTitles: ["Club Closed"]
+      });
+      scvcc.checkCourtAvailability = async () => ({
+        success: true,
+        slots: [{ time: "7:00 PM", courts: [{ court: "Court 1", status: "available", availableMinutes: 90 }] }]
+      });
+      scvcc.bookCourt = async () => {
+        bookAttempts++;
+        return { success: false, clubClosed: true, clubClosedTitle: "Club Closed", time: "7:00 PM" };
+      };
+
+      const pollState = {
+        remoteJid: "group1@g.us",
+        name: "Tomorrow 7pm",
+        targetDateMDY: "11/26/2026",
+        queryTime: "7:00 PM",
+        courtBookingType: "doubles",
+        unbookedCourts: [{ court: "Court 1", time: "7:00 PM" }],
+        tentativeCourts: [],
+        prebookedCourts: []
+      };
+
+      try {
+        await handleOnDemandCourtBooking(null, "poll_closed_ondemand", pollState, [], { persistPolls: () => {} });
+        assert.equal(bookAttempts, 1, "Should stop after 1 booking attempt when clubClosed is true");
+        assert.ok(Array.isArray(pollState.closedTimes));
+        assert.equal(pollState.closedTimes.length, 1);
+        assert.equal(pollState.closedTimes[0].title, "Club Closed");
+      } finally {
+        scvcc.checkCourtAvailability = origCheck;
+        scvcc.bookCourt = origBook;
+        groupsConfig.getGroupConfig = origGetConfig;
+      }
+    });
+  });
 });
