@@ -78,6 +78,7 @@ const anthropic = require('./lib/anthropic');
 const pollTime = require('./lib/pollTime');
 const { parseLineup } = require('./lib/lineupParser');
 const { resolvePlayDateTime, getSanJoseNow, getSanJoseParts } = pollTime;
+const { normalizeCommandDashes } = require('./lib/textNormalize');
 
 // Claude Tools & Schemas (extracted to lib/claudeTools.js)
 const { CLAUDE_TOOLS, CACHED_CLAUDE_TOOLS } = require('./lib/claudeTools');
@@ -590,7 +591,8 @@ async function getResponse(sock, rawText, chatId, sender, msg) {
     : isAddressedToBot(text, msg, botJids);
 
   // 1. Check structured commands via modular router
-  const commandText = addressed ? (promptText || text) : text;
+  const normalizedPromptText = normalizeCommandDashes(promptText);
+  const commandText = normalizeCommandDashes(addressed ? (normalizedPromptText || text) : text);
   const handled = await routeCommand(sock, commandText, chatId, sender, msg, context);
   if (handled !== null) {
     return handled;
@@ -608,20 +610,20 @@ async function getResponse(sock, rawText, chatId, sender, msg) {
   if (TRIGGER_PREFIX && !addressed) {
     return null;
   }
-  if (!promptText) return null;
+  if (!normalizedPromptText) return null;
 
   // Direct recurring poll phrase
-  const directRecurringParsed = recurringPollsModule.parseRecurringPollText(promptText);
+  const directRecurringParsed = recurringPollsModule.parseRecurringPollText(normalizedPromptText);
   if (directRecurringParsed) {
     const senderJid = msg?.key?.participant || msg?.key?.remoteJid;
-    return await recurringCommands.handleRecurringCommand(sock, promptText, chatId, sender, senderJid, {
+    return await recurringCommands.handleRecurringCommand(sock, normalizedPromptText, chatId, sender, senderJid, {
       ...context,
       cancelOrDeletePoll: (s, rJid, pId) => pollCommands.cancelOrDeletePoll(s, rJid, pId, context)
     });
   }
 
   // Direct poll creation phrase
-  const directPollParsed = pollCommands.parsePollCreationText(promptText);
+  const directPollParsed = pollCommands.parsePollCreationText(normalizedPromptText);
   if (directPollParsed) {
     return await pollCommands.handleDirectPollCreation(sock, chatId, sender, msg, directPollParsed, { isCommand: false }, context);
   }
