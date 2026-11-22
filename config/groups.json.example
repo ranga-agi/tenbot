@@ -11,6 +11,7 @@
       "/Junior.*Clinic/i"
     ],
     "maxInitialPolls": 2,
+    "bookingDuration": 90,
     "bookingCourtPreference": [
       2,
       3,
@@ -44,6 +45,7 @@
       ],
       "bookingStrategy": "advanced",
       "bookingSchedule": "-7days 7:00AM",
+      "bookingDuration": 90,
       "maxInitialPolls": 2
     }
   }

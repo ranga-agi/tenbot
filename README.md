@@ -130,14 +130,14 @@ The bot integrates directly with Silver Creek Valley Country Club (SCVCC) for bo
   * `!webcam [video]` — Capture and send a live SCVCC court photo snapshot (or 10-second video clip with `video`).
 * **Direct & Poll-Linked Bookings (`!bookcourt` / `!modifycourt` / `!cancelcourt`)**:
   * Book directly: `!bookcourt [Court <N>] <time> [when] [singles/doubles] [duration] [pb] [for <requester>] [with <players>]`.
-  * Book for an existing poll: `!bookcourt <pollId> [all|<count>] [Court <N>]` — omitting count books courts needed to cover current votes; `all` books remaining courts up to full poll size; `<count>` books an exact number of additional courts; optional `Court <N>` targets a specific court. Accepts split-poll `parentPollId`.
+  * Book for an existing poll: `!bookcourt <pollId> [all|<count>] [Court <N>] [duration]` — omitting count books courts needed to cover current votes; `all` books remaining courts up to full poll size; `<count>` books an exact number of additional courts; optional `Court <N>` targets a specific court; optional duration (`60min`, `1h`, `--booking-duration=60m`) overrides the booking duration. Accepts split-poll `parentPollId`.
   * Modify or cancel: `!modifycourt` updates reservation court, time, date, duration, format, or players (with `--group` for admins) and syncs linked polls; `!cancelcourt <id>` cancels by reservation ID.
   * Admin controls: `!pausecourtbookings [group|all]` / `!resumecourtbookings [group|all]` (plus superadmin `!pauseallcourtbookings` / `!resumeallcourtbookings`).
 * **Releasing Poll Courts (`!releasecourt`)**:
   * `!releasecourt [pollId/when] <count|all|Court N> [--keep-size]` cancels SCVCC reservation(s) and updates the poll (supporting single polls, split polls via `parentPollId`, and multi-time polls).
   * By default, releasing courts shrinks poll capacity proportionally and closes/deletes the poll if all courts are released. Pass `--keep-size` (or `--no-resize` / `--preserve-size`) to cancel the court reservation(s) while keeping the poll size unchanged and voting open.
 * **Automated Poll Court Strategies & Protections**:
-  * Configurable via poll flags or `config/groups.json`: `--courts-strategy=book|lookup|none` (default `none`), `--booking-strategy=standard|advanced` (e.g. `--booking-schedule="-7days 7:00AM"`), `--pre-book-courts`, `--max-courts`, `--booking-court-preference`, `--look-around`, `--booking-players`, `--skip-court` / `--unskip-court`, and `!advancedbookings`.
+  * Configurable via poll flags or `config/groups.json`: `--courts-strategy=book|lookup|none` (default `none`), `--booking-strategy=standard|advanced` (e.g. `--booking-schedule="-7days 7:00AM"`), `--booking-duration=<30|60|90|120>` (or shorthand like `60min`, `1h`, `1.5h`, `2h`; default `90` mins; precedence: poll flag > recurring schedule > `groups.json` `bookingDuration` > `90`), `--pre-book-courts`, `--max-courts`, `--booking-court-preference`, `--look-around`, `--booking-players`, `--skip-court` / `--unskip-court`, and `!advancedbookings`.
   * **Tentative & Club Closed Detection**: Honors `tentativeBookingTitles` when sizing auto polls, and rejects poll creation / aborts booking when club titles match `clubClosedTitles`.
   * **Auto-Release on Low Turnout**: Automatically releases unused pre-booked courts if player signups are insufficient before playtime (automatically disabled when a poll is stopped with `!stoppoll`).
 
@@ -149,7 +149,7 @@ The bot integrates directly with Silver Creek Valley Country Club (SCVCC) for bo
 * **Stopping, Resuming & Limiting Slots**:
   * `!stoppoll [pollId]` / `!resumepoll [pollId]` pauses or resumes voting, reminders, and automatic court releases without deleting the poll.
   * `!setslots` adjusts internal player limits for an active poll, a multi-time slot, or a future recurring instance without recreating the WhatsApp poll.
-* **Modifying Polls (`!modifyinstance` / `@tenbot ...`)**: Updates spots, time, title, courts, skipped courts, or voting/lineup flags on an active poll (re-posting and deleting the older WhatsApp poll when options/title change, or updating settings in-place).
+* **Modifying Polls (`!modifyinstance` / `@tenbot ...`)**: Updates spots, time, title, booking duration (`--booking-duration=60m` or `60min`), courts, skipped courts, or voting/lineup flags on an active poll (re-posting and deleting the older WhatsApp poll when options/title change, or updating settings and linked SCVCC reservations in-place).
 * **Deleted in WhatsApp Sync**: When a poll is deleted for everyone directly in the WhatsApp app, the bot detects revocation/deletion events across `messages.upsert`, `messages.update`, and `messages.delete` and cleans up active poll state.
 * **Automated Reminders & Quiet Hours**: Sends scheduled reminder notifications (`64h`, `32h`, `16h`, `8h`, `4h`, `2h`, `1h` before play time) respecting group quiet hours (`!quiethours`, default `22:00-07:00`). Supports manual `!remind`, `!forceremind` (`--force` to bypass quiet hours), `!pausereminders`, and `!resumereminders`.
 
