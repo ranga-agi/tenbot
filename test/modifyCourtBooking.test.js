@@ -419,6 +419,275 @@ describe('scvcc.modifyCourtBooking API execution', () => {
       scvcc.authFetch = originalAuthFetch;
     }
   });
+
+  it('should follow up with duration-only lbBook when time change causes SCVCC to reset duration to 30 Minutes', async () => {
+    const originalAuthFetch = scvcc.authFetch;
+    const state = {
+      court: 'Court 1',
+      date: '11/4/2026',
+      time: '7:00 AM',
+      duration: '90 Minutes',
+      vs: 'vs_initial'
+    };
+    const postBodies = [];
+
+    const renderDialogHtml = () => `
+      <html><body>
+        <input type="hidden" name="__VIEWSTATE" value="${state.vs}" />
+        <input name="ctl00$ctrl_MakeBookingTime$drpStartResource$tCombo" value="${state.court}" />
+        <input name="ctl00$ctrl_MakeBookingTime$rdDate$tMDateBox" value="${state.date}" />
+        <input name="ctl00$ctrl_MakeBookingTime$drpTime$tCombo" value="${state.time}" />
+        <input name="ctl00$ctrl_MakeBookingTime$drpDuration$tCombo" value="${state.duration}" />
+        <input name="ctl00$ctrl_MakeBookingTime$drpPartySize$tCombo" value="Doubles" />
+        <input name="ctl00$ctrl_MakeBookingTime$P1$PCombo$PlayerName" value="Immaneni, Pramod" />
+        <input name="ctl00$ctrl_MakeBookingTime$P1$PCombo$PlayerID" value="8916615" />
+      </body></html>
+    `;
+
+    scvcc.authFetch = async (url, options) => {
+      if (!options || !options.method || options.method === 'GET') {
+        return { ok: true, status: 200, text: async () => renderDialogHtml() };
+      }
+      const params = new URLSearchParams(options.body);
+      postBodies.push(params);
+      const postedTime = params.get('ctl00$ctrl_MakeBookingTime$drpTime$tCombo');
+      const postedDuration = params.get('ctl00$ctrl_MakeBookingTime$drpDuration$tCombo');
+      // Simulate Clubessential AutoPostBack: if drpTime changed vs ViewState, drpDuration resets to 30 Minutes
+      if (postedTime !== state.time) {
+        state.time = postedTime;
+        state.duration = '30 Minutes';
+        state.vs = 'vs_after_time_change';
+      } else {
+        state.duration = postedDuration;
+        state.vs = 'vs_after_duration_fixup';
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '1|#||4|28|pageRedirect||%2fdialog.aspx%3fp%3drbmPop%26tt%3dReturnbookingTime(194617)|'
+      };
+    };
+
+    try {
+      const res = await scvcc.modifyCourtBooking({
+        reservationId: '194617',
+        time: '7:30 AM',
+        duration: '60 Minutes',
+        chatId: 'test_chat'
+      });
+
+      assert.equal(res.success, true);
+      assert.equal(res.time, '7:30 AM');
+      assert.equal(res.duration, '60 Minutes');
+      assert.equal(res.durationMismatch, undefined);
+      assert.equal(postBodies.length, 2);
+      assert.equal(postBodies[1].get('__VIEWSTATE'), 'vs_after_time_change');
+      assert.equal(postBodies[1].get('ctl00$ctrl_MakeBookingTime$drpTime$tCombo'), '7:30 AM');
+      assert.equal(postBodies[1].get('ctl00$ctrl_MakeBookingTime$drpDuration$tCombo'), '60 Minutes');
+    } finally {
+      scvcc.authFetch = originalAuthFetch;
+    }
+  });
+
+  it('should restore existing duration via follow-up when time-only modify causes SCVCC to reset duration', async () => {
+    const originalAuthFetch = scvcc.authFetch;
+    const state = { time: '7:00 AM', duration: '90 Minutes' };
+    let postCount = 0;
+
+    scvcc.authFetch = async (url, options) => {
+      if (!options || !options.method || options.method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => `
+            <input type="hidden" name="__VIEWSTATE" value="vs_${postCount}" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpStartResource$tCombo" value="Court 2" />
+            <input name="ctl00$ctrl_MakeBookingTime$rdDate$tMDateBox" value="11/4/2026" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpTime$tCombo" value="${state.time}" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpDuration$tCombo" value="${state.duration}" />
+          `
+        };
+      }
+      postCount++;
+      const params = new URLSearchParams(options.body);
+      const postedTime = params.get('ctl00$ctrl_MakeBookingTime$drpTime$tCombo');
+      if (postedTime !== state.time) {
+        state.time = postedTime;
+        state.duration = '30 Minutes';
+      } else {
+        state.duration = params.get('ctl00$ctrl_MakeBookingTime$drpDuration$tCombo');
+      }
+      return { ok: true, status: 200, text: async () => 'ReturnbookingTime(194617)' };
+    };
+
+    try {
+      const res = await scvcc.modifyCourtBooking({
+        reservationId: '194617',
+        time: '7:30 AM'
+      });
+      assert.equal(res.success, true);
+      assert.equal(res.duration, '90 Minutes');
+      assert.equal(postCount, 2);
+    } finally {
+      scvcc.authFetch = originalAuthFetch;
+    }
+  });
+
+  it('should support administrative override during duration follow-up POST', async () => {
+    const originalAuthFetch = scvcc.authFetch;
+    const state = { time: '7:00 AM', duration: '90 Minutes' };
+    let postCount = 0;
+    let followUpOverrideTriggered = false;
+
+    scvcc.authFetch = async (url, options) => {
+      if (!options || !options.method || options.method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => `
+            <input type="hidden" name="__VIEWSTATE" value="vs_${postCount}" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpStartResource$tCombo" value="Court 2" />
+            <input name="ctl00$ctrl_MakeBookingTime$rdDate$tMDateBox" value="11/4/2026" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpTime$tCombo" value="${state.time}" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpDuration$tCombo" value="${state.duration}" />
+          `
+        };
+      }
+      postCount++;
+      const params = new URLSearchParams(options.body);
+      if (postCount === 1) {
+        state.time = params.get('ctl00$ctrl_MakeBookingTime$drpTime$tCombo');
+        state.duration = '30 Minutes';
+        return { ok: true, status: 200, text: async () => 'ReturnbookingTime(194617)' };
+      }
+      if (!options.body.includes('OverrideBtn')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => '<div>Override required<input type="submit" name="ctl00$ctrl_MakeBookingTime$OverrideBtn" value="Override" /></div>'
+        };
+      }
+      followUpOverrideTriggered = true;
+      state.duration = params.get('ctl00$ctrl_MakeBookingTime$drpDuration$tCombo');
+      return { ok: true, status: 200, text: async () => 'ReturnbookingTime(194617)' };
+    };
+
+    try {
+      const res = await scvcc.modifyCourtBooking({
+        reservationId: '194617',
+        time: '7:30 AM',
+        duration: '60 Minutes'
+      });
+      assert.equal(res.success, true);
+      assert.equal(followUpOverrideTriggered, true);
+      assert.equal(res.duration, '60 Minutes');
+      assert.equal(postCount, 3);
+    } finally {
+      scvcc.authFetch = originalAuthFetch;
+    }
+  });
+
+  it('should not send redundant follow-up POST when verification GET confirms requested duration was saved', async () => {
+    const originalAuthFetch = scvcc.authFetch;
+    const state = { time: '7:00 AM', duration: '90 Minutes' };
+    let postCount = 0;
+
+    scvcc.authFetch = async (url, options) => {
+      if (!options || !options.method || options.method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => `
+            <input type="hidden" name="__VIEWSTATE" value="vs1" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpStartResource$tCombo" value="Court 3" />
+            <input name="ctl00$ctrl_MakeBookingTime$rdDate$tMDateBox" value="11/4/2026" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpTime$tCombo" value="${state.time}" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpDuration$tCombo" value="${state.duration}" />
+          `
+        };
+      }
+      postCount++;
+      const params = new URLSearchParams(options.body);
+      if (!options.body.includes('OverrideBtn')) {
+        return { ok: true, status: 200, text: async () => '<input type="submit" name="ctl00$ctrl_MakeBookingTime$OverrideBtn" value="Override" />' };
+      }
+      state.time = params.get('ctl00$ctrl_MakeBookingTime$drpTime$tCombo');
+      state.duration = params.get('ctl00$ctrl_MakeBookingTime$drpDuration$tCombo');
+      return { ok: true, status: 200, text: async () => 'ReturnbookingTime(194617)' };
+    };
+
+    try {
+      const res = await scvcc.modifyCourtBooking({
+        reservationId: '194617',
+        time: '7:30 AM',
+        duration: '60 Minutes'
+      });
+      assert.equal(res.success, true);
+      assert.equal(res.duration, '60 Minutes');
+      assert.equal(postCount, 2); // Only lbBook + OverrideBtn, no extra duration follow-up
+    } finally {
+      scvcc.authFetch = originalAuthFetch;
+    }
+  });
+
+  it('should report actual saved duration and warning when follow-up duration extension is rejected by SCVCC', async () => {
+    const originalAuthFetch = scvcc.authFetch;
+    const state = { time: '7:00 AM', duration: '90 Minutes' };
+    let postCount = 0;
+
+    scvcc.authFetch = async (url, options) => {
+      if (!options || !options.method || options.method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => `
+            <input type="hidden" name="__VIEWSTATE" value="vs1" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpStartResource$tCombo" value="Court 1" />
+            <input name="ctl00$ctrl_MakeBookingTime$rdDate$tMDateBox" value="11/4/2026" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpTime$tCombo" value="${state.time}" />
+            <input name="ctl00$ctrl_MakeBookingTime$drpDuration$tCombo" value="${state.duration}" />
+          `
+        };
+      }
+      postCount++;
+      if (postCount === 1) {
+        state.time = '7:30 AM';
+        state.duration = '30 Minutes';
+        return { ok: true, status: 200, text: async () => 'ReturnbookingTime(194617)' };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '<span class="rbm_Error">Only 30 minutes available before next booking.</span>'
+      };
+    };
+
+    try {
+      const res = await scvcc.modifyCourtBooking({
+        reservationId: '194617',
+        time: '7:30 AM',
+        duration: '60 Minutes'
+      });
+      assert.equal(res.success, true);
+      assert.equal(res.time, '7:30 AM');
+      assert.equal(res.duration, '30 Minutes');
+      assert.equal(res.requestedDuration, '60 Minutes');
+      assert.equal(res.durationMismatch, true);
+      assert.match(res.message, /Requested duration \*60 Minutes\*, but SCVCC kept \*30 Minutes\*/);
+
+      // Duration-only modify that gets rejected should return success: false
+      postCount = 0;
+      state.duration = '30 Minutes';
+      const durOnlyRes = await scvcc.modifyCourtBooking({
+        reservationId: '194617',
+        duration: '60 Minutes'
+      });
+      assert.equal(durOnlyRes.success, false);
+      assert.match(durOnlyRes.message, /Only 30 minutes available/);
+    } finally {
+      scvcc.authFetch = originalAuthFetch;
+    }
+  });
 });
 
 describe('handleModifyPollInstance with advanceBookedCourts', () => {
