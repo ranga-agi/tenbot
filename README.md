@@ -75,6 +75,7 @@ Specify comma-separated play times or days (e.g. `!poll Saturday 8am, 9:30am, 4p
 Automate recurring single-time or multi-time polls via `!recurringpoll` (e.g. `!recurringpoll 4 7pm on weekdays at 8am`, `!recurringpoll 4 8am, 9:30am on weekends at 1 day before at 6pm`):
 - Supports day expressions (`everyday`, `weekdays`, `weekends`, `mon-thu`, `tue,thu`), `--start-date` / `--end-date`, and `at <postTime>` posting schedules.
 - Supports template management (`!modifyrecurringpoll`, `!pauserecurringpoll [until <date>]`, `!resumerecurringpoll`, `!cancelrecurringpoll`, `!recurringpolls`) and per-instance overrides (`!modifyinstance`, `!skipinstance`, `!unskipinstance`) without altering the recurring template.
+- When `!modifyrecurringpoll` changes the match time or booking duration, upcoming unposted advance court bookings are automatically moved/updated on SCVCC (falling back to alternative available courts if needed, or warning and resetting for retry if none can be moved).
 
 ### 5. Manually Created Tennis Match Polls (Passive Tracking & Extra Player Resolution)
 If a poll for scheduling matches is created manually by a user directly in WhatsApp:

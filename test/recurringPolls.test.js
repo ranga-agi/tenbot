@@ -1603,4 +1603,379 @@ describe('recurringPolls', () => {
       }
     });
   });
+
+  describe("syncing advance court bookings when recurring poll time or duration changes", () => {
+    const testSj = { year: 2026, month: 10, day: 21, hour: 10, minute: 0 };
+    const testChatId = "120363402559062529@g.us";
+
+    it("moves existing SCVCC advance booking in-place when same court is available at the new match time", async () => {
+      const scvcc = require("../lib/scvcc");
+      const origModify = scvcc.modifyCourtBooking;
+      const modifyCalls = [];
+
+      scvcc.modifyCourtBooking = async (opts) => {
+        modifyCalls.push(opts);
+        return {
+          success: true,
+          reservationId: opts.reservationId,
+          court: opts.court || "Court 2",
+          date: opts.date || "11/28/2026",
+          time: opts.time || "6:00 PM",
+          duration: opts.duration || "90 Minutes"
+        };
+      };
+
+      try {
+        const recurringPolls = new Map([["rec_move_same", {
+          id: "rec_move_same",
+          remoteJid: testChatId,
+          size: 4,
+          matchTime: "7pm",
+          matchDisplay: "7:00 PM",
+          matchHour: 19,
+          matchMinute: 0,
+          postTime: "8am",
+          postDisplay: "8:00 AM",
+          days: "sat",
+          daysList: [6],
+          bookingStrategy: "advanced",
+          bookingDuration: 90,
+          enabled: true,
+          advanceBookings: {
+            "2026-11-28": {
+              targetDateMDY: "11/28/2026",
+              matchTime: "7pm",
+              targetCourtsCount: 1,
+              completed: true,
+              autoBookedCourts: [{
+                court: "Court 2",
+                time: "7:00 PM",
+                reservationId: "99101",
+                players: ["Pramod Immaneni"],
+                duration: "90 Minutes"
+              }],
+              advanceBookedCourts: [{
+                court: "Court 2",
+                time: "7:00 PM",
+                reservationId: "99101",
+                players: ["Pramod Immaneni"],
+                duration: "90 Minutes"
+              }],
+              prebookedCourts: [{
+                court: "Court 2",
+                player: "Pramod Immaneni",
+                fullName: "Pramod Immaneni",
+                time: "7:00 PM",
+                bookingType: "auto"
+              }]
+            }
+          }
+        }]]);
+
+        const res = await recurringPollsModule.modifyRecurringPoll({
+          recurringPolls,
+          persistPolls: () => {},
+          sender: "Alice",
+          scheduleId: "rec_move_same",
+          updates: { matchTime: "6pm" },
+          customSanJoseParts: testSj
+        });
+
+        assert.equal(modifyCalls.length, 1);
+        assert.equal(modifyCalls[0].reservationId, "99101");
+        assert.equal(modifyCalls[0].time, "6:00 PM");
+        assert.equal(modifyCalls[0].date, "11/28/2026");
+
+        const entry = recurringPolls.get("rec_move_same").advanceBookings["2026-11-28"];
+        assert.equal(entry.matchTime, "6pm");
+        assert.equal(entry.completed, true);
+        assert.equal(entry.autoBookedCourts[0].time, "6:00 PM");
+        assert.equal(entry.advanceBookedCourts[0].time, "6:00 PM");
+        assert.equal(entry.prebookedCourts[0].time, "6:00 PM");
+        assert.match(res, /Advance Court Bookings:/);
+        assert.match(res, /Moved \*Court 2\* \(7:00 PM → \*6:00 PM\*/);
+      } finally {
+        scvcc.modifyCourtBooking = origModify;
+      }
+    });
+
+    it("falls back to an alternative preferred available court when the original court cannot move to the new time", async () => {
+      const scvcc = require("../lib/scvcc");
+      const origModify = scvcc.modifyCourtBooking;
+      const origCheckAvail = scvcc.checkCourtAvailability;
+      const modifyCalls = [];
+
+      scvcc.modifyCourtBooking = async (opts) => {
+        modifyCalls.push(opts);
+        if (!opts.court || opts.court === "Court 2") {
+          return { success: false, message: "Court 2 is already booked at 6:00 PM" };
+        }
+        return {
+          success: true,
+          reservationId: opts.reservationId,
+          court: opts.court,
+          date: opts.date || "11/28/2026",
+          time: opts.time,
+          duration: "90 Minutes"
+        };
+      };
+
+      scvcc.checkCourtAvailability = async () => ({
+        slots: [{
+          time: "6:00 PM",
+          courts: [
+            { court: "Court 1", status: "available", availableMinutes: 90 },
+            { court: "Court 2", status: "booked", availableMinutes: 0 },
+            { court: "Court 3", status: "available", availableMinutes: 90 }
+          ]
+        }]
+      });
+
+      try {
+        const recurringPolls = new Map([["rec_move_alt", {
+          id: "rec_move_alt",
+          remoteJid: testChatId,
+          size: 4,
+          matchTime: "7pm",
+          matchDisplay: "7:00 PM",
+          matchHour: 19,
+          matchMinute: 0,
+          postTime: "8am",
+          postDisplay: "8:00 AM",
+          days: "sat",
+          daysList: [6],
+          bookingStrategy: "advanced",
+          bookingCourtPreference: ["3", "1"],
+          bookingDuration: 90,
+          enabled: true,
+          advanceBookings: {
+            "2026-11-28": {
+              targetDateMDY: "11/28/2026",
+              matchTime: "7pm",
+              targetCourtsCount: 1,
+              completed: true,
+              autoBookedCourts: [{
+                court: "Court 2",
+                time: "7:00 PM",
+                reservationId: "99202",
+                players: ["Pramod Immaneni"],
+                duration: "90 Minutes"
+              }],
+              advanceBookedCourts: [{
+                court: "Court 2",
+                time: "7:00 PM",
+                reservationId: "99202",
+                players: ["Pramod Immaneni"],
+                duration: "90 Minutes"
+              }],
+              prebookedCourts: [{
+                court: "Court 2",
+                player: "Pramod Immaneni",
+                fullName: "Pramod Immaneni",
+                time: "7:00 PM",
+                bookingType: "auto"
+              }]
+            }
+          }
+        }]]);
+
+        const res = await recurringPollsModule.modifyRecurringPoll({
+          recurringPolls,
+          persistPolls: () => {},
+          sender: "Alice",
+          scheduleId: "rec_move_alt",
+          updates: { matchTime: "6pm" },
+          customSanJoseParts: testSj
+        });
+
+        assert.equal(modifyCalls.length, 2);
+        assert.equal(modifyCalls[1].court, "Court 3", "Should prefer Court 3 over Court 1 per bookingCourtPreference");
+
+        const entry = recurringPolls.get("rec_move_alt").advanceBookings["2026-11-28"];
+        assert.equal(entry.autoBookedCourts[0].court, "Court 3");
+        assert.equal(entry.autoBookedCourts[0].time, "6:00 PM");
+        assert.equal(entry.prebookedCourts[0].court, "Court 3");
+        assert.match(res, /Moved \*Court 2\* \(7:00 PM\) → \*Court 3\* \(\*6:00 PM\*/);
+      } finally {
+        scvcc.modifyCourtBooking = origModify;
+        scvcc.checkCourtAvailability = origCheckAvail;
+      }
+    });
+
+    it("preserves SCVCC reservation, detaches incompatible bookings, warns, and resets entry for retry when no courts can move; keeps posted-poll bookings untouched", async () => {
+      const scvcc = require("../lib/scvcc");
+      const origModify = scvcc.modifyCourtBooking;
+      const origCheckAvail = scvcc.checkCourtAvailability;
+      const origCancel = scvcc.cancelCourtReservation;
+      let cancelCalls = 0;
+
+      scvcc.modifyCourtBooking = async () => ({ success: false, message: "No courts open at 6:00 PM" });
+      scvcc.checkCourtAvailability = async () => ({ slots: [{ time: "6:00 PM", courts: [] }] });
+      scvcc.cancelCourtReservation = async () => {
+        cancelCalls++;
+        return { success: true };
+      };
+
+      try {
+        const recurringPolls = new Map([["rec_move_fail", {
+          id: "rec_move_fail",
+          remoteJid: testChatId,
+          size: 4,
+          matchTime: "7pm",
+          matchDisplay: "7:00 PM",
+          matchHour: 19,
+          matchMinute: 0,
+          postTime: "8am",
+          postDisplay: "8:00 AM",
+          days: "sat,sun",
+          daysList: [0, 6],
+          postedMatchDates: ["2026-11-22"],
+          bookingStrategy: "advanced",
+          bookingDuration: 90,
+          enabled: true,
+          advanceBookings: {
+            "2026-11-22": {
+              targetDateMDY: "11/22/2026",
+              matchTime: "7pm",
+              targetCourtsCount: 1,
+              completed: true,
+              pollCreated: true,
+              autoBookedCourts: [{ court: "Court 1", time: "7:00 PM", reservationId: "88001", players: ["Pramod Immaneni"], duration: "90 Minutes" }],
+              advanceBookedCourts: [{ court: "Court 1", time: "7:00 PM", reservationId: "88001", players: ["Pramod Immaneni"], duration: "90 Minutes" }],
+              prebookedCourts: [{ court: "Court 1", player: "Pramod Immaneni", time: "7:00 PM", bookingType: "auto" }]
+            },
+            "2026-11-28": {
+              targetDateMDY: "11/28/2026",
+              matchTime: "7pm",
+              targetCourtsCount: 2,
+              completed: true,
+              autoBookedCourts: [{ court: "Court 2", time: "7:00 PM", reservationId: "99303", players: ["Pramod Immaneni"], duration: "90 Minutes" }],
+              advanceBookedCourts: [{ court: "Court 2", time: "7:00 PM", reservationId: "99303", players: ["Pramod Immaneni"], duration: "90 Minutes" }],
+              prebookedCourts: [
+                { court: "Court 2", player: "Pramod Immaneni", time: "7:00 PM", bookingType: "auto" },
+                { court: "Court 4", player: "Vijay", fullName: "Vijay", time: "7:00 PM", bookingType: "manual" }
+              ]
+            },
+            "2026-11-29": {
+              targetDateMDY: "11/29/2026",
+              matchTime: "7pm",
+              targetCourtsCount: 1,
+              completed: true,
+              clubClosed: true,
+              autoBookedCourts: [],
+              advanceBookedCourts: [],
+              prebookedCourts: []
+            }
+          }
+        }]]);
+
+        const res = await recurringPollsModule.modifyRecurringPoll({
+          recurringPolls,
+          persistPolls: () => {},
+          sender: "Alice",
+          scheduleId: "rec_move_fail",
+          updates: { matchTime: "6pm" },
+          customSanJoseParts: testSj
+        });
+
+        assert.equal(cancelCalls, 0, "Must not cancel existing SCVCC reservations when move fails");
+        const sched = recurringPolls.get("rec_move_fail");
+        assert.equal(sched.advanceBookings["2026-11-22"].autoBookedCourts[0].time, "7:00 PM", "Already-posted instance stays untouched");
+        assert.equal(sched.advanceBookings["2026-11-28"], undefined, "Unposted entry with no remaining compatible bookings is cleared for fresh retry");
+        assert.equal(sched.advanceBookings["2026-11-29"], undefined, "Old-time clubClosed attempt is cleared for fresh retry");
+        assert.match(res, /Poll already posted — kept existing booking\(s\) as-is/);
+        assert.match(res, /Could not move \*Court 2\* \(7:00 PM, ID: `99303`\) to \*6:00 PM\*/);
+        assert.match(res, /!cancelcourt 99303/);
+        assert.match(res, /Manual booking on \*Court 4\* at 7:00 PM \(by Vijay\) no longer matches \*6(?::00)? PM\*/);
+        assert.match(res, /Cleared prior attempt state for 7pm/);
+      } finally {
+        scvcc.modifyCourtBooking = origModify;
+        scvcc.checkCourtAvailability = origCheckAvail;
+        scvcc.cancelCourtReservation = origCancel;
+      }
+    });
+
+    it("updates duration on unposted advance bookings when bookingDuration changes and keeps bookings within lookAround when move fails", async () => {
+      const scvcc = require("../lib/scvcc");
+      const origModify = scvcc.modifyCourtBooking;
+      const origCheckAvail = scvcc.checkCourtAvailability;
+      const modifyCalls = [];
+
+      scvcc.modifyCourtBooking = async (opts) => {
+        modifyCalls.push(opts);
+        if (opts.time === "6:30 PM") {
+          return { success: false, message: "6:30 PM busy" };
+        }
+        return {
+          success: true,
+          reservationId: opts.reservationId,
+          court: "Court 2",
+          date: opts.date || "11/28/2026",
+          time: "7:00 PM",
+          duration: opts.duration
+        };
+      };
+      scvcc.checkCourtAvailability = async () => ({ slots: [] });
+
+      try {
+        const recurringPolls = new Map([["rec_dur_la", {
+          id: "rec_dur_la",
+          remoteJid: testChatId,
+          size: 4,
+          matchTime: "7pm",
+          matchDisplay: "7:00 PM",
+          matchHour: 19,
+          matchMinute: 0,
+          postTime: "8am",
+          postDisplay: "8:00 AM",
+          days: "sat",
+          daysList: [6],
+          lookAround: 60,
+          bookingStrategy: "advanced",
+          bookingDuration: 90,
+          enabled: true,
+          advanceBookings: {
+            "2026-11-28": {
+              targetDateMDY: "11/28/2026",
+              matchTime: "7pm",
+              targetCourtsCount: 1,
+              completed: true,
+              autoBookedCourts: [{ court: "Court 2", time: "7:00 PM", reservationId: "99404", players: ["Pramod Immaneni"], duration: "90 Minutes" }],
+              advanceBookedCourts: [{ court: "Court 2", time: "7:00 PM", reservationId: "99404", players: ["Pramod Immaneni"], duration: "90 Minutes" }],
+              prebookedCourts: [{ court: "Court 2", player: "Pramod Immaneni", time: "7:00 PM", bookingType: "auto" }]
+            }
+          }
+        }]]);
+
+        const durRes = await recurringPollsModule.modifyRecurringPoll({
+          recurringPolls,
+          persistPolls: () => {},
+          sender: "Alice",
+          scheduleId: "rec_dur_la",
+          updates: { bookingDuration: 60 },
+          customSanJoseParts: testSj
+        });
+        assert.equal(modifyCalls.length, 1);
+        assert.equal(modifyCalls[0].duration, "60 Minutes");
+        assert.equal(recurringPolls.get("rec_dur_la").advanceBookings["2026-11-28"].autoBookedCourts[0].duration, "60 Minutes");
+        assert.match(durRes, /Updated \*Court 2\* duration to \*60 Minutes\*/);
+
+        const laRes = await recurringPollsModule.modifyRecurringPoll({
+          recurringPolls,
+          persistPolls: () => {},
+          sender: "Alice",
+          scheduleId: "rec_dur_la",
+          updates: { matchTime: "6:30pm" },
+          customSanJoseParts: testSj
+        });
+        const entryAfter = recurringPolls.get("rec_dur_la").advanceBookings["2026-11-28"];
+        assert.equal(entryAfter.autoBookedCourts.length, 1, "7:00 PM booking should remain kept within 60m look-around of 6:30 PM");
+        assert.equal(entryAfter.completed, true);
+        assert.match(laRes, /Kept \*Court 2\* at 7:00 PM \(within look-around window/);
+      } finally {
+        scvcc.modifyCourtBooking = origModify;
+        scvcc.checkCourtAvailability = origCheckAvail;
+      }
+    });
+  });
 });
