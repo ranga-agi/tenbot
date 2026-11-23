@@ -8147,6 +8147,7 @@ describe('pollCommands', () => {
       assert.doesNotMatch(activeOut, /\n---\n/, "Split parts must be grouped into a single section");
       assert.match(activeOut, /Poll Session session_fri7pm \(Friday 7pm\): 16 spots \(Doubles, split into 2 polls\)\./);
       assert.match(activeOut, /Status: active \(1\/2 parts filled\)/);
+      assert.match(activeOut, /Created: 10\/24\/2026, 8:00:00 AM/);
       assert.match(activeOut, /Slots filled: 13\/16/);
       assert.match(activeOut, /Currently playing \(13\):/);
       assert.match(activeOut, /Split Poll Parts \(2\):/);
@@ -8191,6 +8192,7 @@ describe('pollCommands', () => {
 
       const out = pollStatusText("group1@g.us", { activeOnly: true }, { activePolls, recurringPolls: new Map(), messageStore });
       assert.match(out, /Poll Session session_28_spill \(Saturday 8am\): 28 spots \(Doubles, 2\/3 parts created\)\./);
+      assert.match(out, /Created: unknown/);
       assert.match(out, /Slots filled: 0\/28 \(0\/24 currently open\)/);
     });
   });
@@ -8322,6 +8324,93 @@ describe('pollCommands', () => {
         scvcc.bookCourt = origBook;
         groupsConfig.getGroupConfig = origGetConfig;
       }
+    });
+  });
+
+  describe("Poll creation time display in !activepolls / pollStatusText", () => {
+    it("includes formatted Created timestamp across fixed, opt-in, multi-time, and manual polls in !activepolls", async () => {
+      const createdIso = "2026-10-24T15:30:45.000Z"; // 8:30:45 AM PDT in America/Los_Angeles
+      const playAtIso = "2026-10-25T16:00:00.000Z";
+
+      const activePolls = new Map([
+        ["p_fixed", {
+          remoteJid: "group1@g.us",
+          type: "fixed",
+          size: 4,
+          when: "Tomorrow 9am",
+          playAt: playAtIso,
+          createdAt: createdIso,
+          status: "active",
+          options: ["Player 1", "Player 2", "Player 3", "Player 4"],
+          voteBuffer: new Map()
+        }],
+        ["p_optin", {
+          remoteJid: "group1@g.us",
+          type: "opt_in",
+          size: 4,
+          slotLimit: 4,
+          when: "Tomorrow 10am",
+          playAt: playAtIso,
+          createdAt: createdIso,
+          status: "active",
+          options: ["Yes", "No"],
+          voteBuffer: new Map()
+        }],
+        ["p_multi", {
+          remoteJid: "group1@g.us",
+          type: "multi_time",
+          when: "Tomorrow",
+          playAt: playAtIso,
+          createdAt: createdIso,
+          status: "active",
+          timeSlots: [
+            { id: "slot_8am", label: "8 AM", slotLimit: 4, status: "active" }
+          ],
+          options: ["8 AM", "No"],
+          voteBuffer: new Map()
+        }],
+        ["p_manual", {
+          remoteJid: "group1@g.us",
+          isManual: true,
+          name: "Manual Hit",
+          when: "Sunday",
+          playAt: null,
+          status: "active",
+          options: ["9am", "10am"],
+          voteBuffer: new Map()
+        }]
+      ]);
+
+      const messageStore = new Map([
+        ["group1@g.us:p_manual", {
+          messageTimestamp: Math.floor(new Date(createdIso).getTime() / 1000),
+          pollCreationMessage: { options: [{ optionName: "9am" }, { optionName: "10am" }] }
+        }]
+      ]);
+      const context = { activePolls, recurringPolls: new Map(), messageStore };
+
+      const out = await handlePollCommand({}, "!activepolls", "group1@g.us", "Alice", "alice@s.whatsapp.net", {}, context);
+      const sections = out.split("\n\n---\n\n");
+      assert.equal(sections.length, 4);
+      for (const section of sections) {
+        assert.match(section, /Created: 10\/24\/2026, 8:30:45 AM/);
+      }
+    });
+
+    it("falls back to Created: unknown when createdAt and messageTimestamp are missing", () => {
+      const activePolls = new Map([
+        ["p_nocreated", {
+          remoteJid: "group1@g.us",
+          type: "fixed",
+          size: 4,
+          when: "Tomorrow 9am",
+          status: "active",
+          options: ["Player 1", "Player 2", "Player 3", "Player 4"],
+          voteBuffer: new Map()
+        }]
+      ]);
+      const out = pollStatusText("group1@g.us", { activeOnly: true }, { activePolls, recurringPolls: new Map() });
+      assert.match(out, /Created: unknown/);
     });
   });
 });
