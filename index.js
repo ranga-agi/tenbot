@@ -249,11 +249,38 @@ function recordName(jid, name, explicitPn = null) {
 /**
  * Decrypts a WhatsApp secretEncryptedMessage edit using the original message's secret key.
  */
+function toBufferField(val) {
+  if (!val) return null;
+  if (Buffer.isBuffer(val)) return val;
+  if (val instanceof Uint8Array) return Buffer.from(val);
+  if (typeof val === 'string') return Buffer.from(val, 'base64');
+  if (typeof val === 'object' && val.type === 'Buffer' && Array.isArray(val.data)) {
+    return Buffer.from(val.data);
+  }
+  return Buffer.from(val);
+}
+
+function unwrapMessageContent(message) {
+  if (!message) return null;
+  let cur = message;
+  for (let i = 0; i < 6; i++) {
+    const norm = (typeof normalizeMessageContent === 'function' ? normalizeMessageContent(cur) : null) || cur;
+    if (norm?.deviceSentMessage?.message) {
+      cur = norm.deviceSentMessage.message;
+      continue;
+    }
+    cur = norm;
+    break;
+  }
+  return cur;
+}
+
 function decryptMessageEdit({ encPayload, encIv }, { editEncKey, originalMsgId, originalSenderJid, editorJid }) {
   if (!editEncKey || !encPayload || !encIv) return null;
-  const payloadBuf = Buffer.isBuffer(encPayload) ? encPayload : Buffer.from(encPayload);
-  const ivBuf = Buffer.isBuffer(encIv) ? encIv : Buffer.from(encIv);
-  const keyBuf = Buffer.isBuffer(editEncKey) ? editEncKey : Buffer.from(editEncKey);
+  const payloadBuf = toBufferField(encPayload);
+  const ivBuf = toBufferField(encIv);
+  const keyBuf = toBufferField(editEncKey);
+  if (!payloadBuf || !ivBuf || !keyBuf) return null;
 
   const sign = Buffer.concat([
     Buffer.from(String(originalMsgId)),
@@ -295,9 +322,9 @@ function tryDecryptMessageEdit({ encPayload, encIv }, { editEncKey, originalMsgI
  */
 function extractText(message) {
   if (!message) return null;
-  const msg = normalizeMessageContent(message) || message;
+  const msg = unwrapMessageContent(message) || message;
   const protoEdit = msg.protocolMessage?.editedMessage;
-  const finalMsg = protoEdit ? (normalizeMessageContent(protoEdit) || protoEdit) : msg;
+  const finalMsg = protoEdit ? (unwrapMessageContent(protoEdit) || protoEdit) : msg;
 
   return (
     finalMsg.conversation ||
@@ -648,12 +675,172 @@ async function getResponse(sock, rawText, chatId, sender, msg) {
 
 function getActualMessage(message) {
   if (!message) return null;
-  const normalized = normalizeMessageContent(message) || message;
+  const normalized = unwrapMessageContent(message) || message;
   const protoEdit = normalized.protocolMessage?.editedMessage;
   if (protoEdit) {
-    return normalizeMessageContent(protoEdit) || protoEdit;
+    return unwrapMessageContent(protoEdit) || protoEdit;
   }
   return normalized;
+}
+
+function getEditMessageSecret(origMsg) {
+  if (!origMsg) return null;
+  const rawMsg = origMsg.message || origMsg;
+  const normalized = unwrapMessageContent(rawMsg) || rawMsg;
+  const secret =
+    origMsg?.messageSecret ||
+    normalized?.messageContextInfo?.messageSecret ||
+    rawMsg?.messageContextInfo?.messageSecret ||
+    origMsg?.messageContextInfo?.messageSecret ||
+    normalized?.pollCreationMessage?.messageContextInfo?.messageSecret ||
+    normalized?.pollCreationMessageV2?.messageContextInfo?.messageSecret ||
+    normalized?.pollCreationMessageV3?.messageContextInfo?.messageSecret ||
+    rawMsg?.pollCreationMessage?.messageContextInfo?.messageSecret ||
+    rawMsg?.pollCreationMessageV2?.messageContextInfo?.messageSecret ||
+    rawMsg?.pollCreationMessageV3?.messageContextInfo?.messageSecret ||
+    null;
+  return toBufferField(secret);
+}
+
+function expandJidCandidates(rawJids) {
+  const result = [];
+  const seen = new Set();
+  const add = (val) => {
+    if (!val || typeof val !== 'string') return;
+    if (!seen.has(val)) {
+      seen.add(val);
+      result.push(val);
+    }
+  };
+
+  for (const raw of rawJids) {
+    if (!raw || typeof raw !== 'string') continue;
+    const norm = jidNormalizedUser(raw) || raw;
+    add(norm);
+    add(raw);
+    const canonical = namesStore.resolveCanonicalId(norm);
+    if (canonical) add(canonical);
+    const pn = namesStore.getPnByLid(norm);
+    if (pn) add(pn);
+    if (canonical && canonical !== norm) {
+      const pnFromCanon = namesStore.getPnByLid(canonical);
+      if (pnFromCanon) add(pnFromCanon);
+    }
+  }
+  return result;
+}
+
+function cleanMsgKeyFields(key) {
+  if (!key || typeof key !== 'object') return {};
+  const cleaned = {};
+  for (const [k, v] of Object.entries(key)) {
+    if (v !== undefined && v !== null && v !== '') {
+      cleaned[k] = v;
+    }
+  }
+  return cleaned;
+}
+
+function decryptSecretEditFromMsg(secretEncMsg, msg, msgStore) {
+  const targetKey = secretEncMsg.targetMessageKey || {};
+  const originalMsgId = targetKey.id;
+  const targetJid = targetKey.remoteJid || msg.key?.remoteJid;
+
+  let origMsg = msgStore && targetJid && originalMsgId ? msgStore.get(storeKey(targetJid, originalMsgId)) : null;
+  if (!origMsg && msgStore && msg.key?.remoteJid && originalMsgId && msg.key.remoteJid !== targetJid) {
+    origMsg = msgStore.get(storeKey(msg.key.remoteJid, originalMsgId));
+  }
+  if (!origMsg && msgStore && originalMsgId) {
+    for (const [k, v] of msgStore.entries()) {
+      if (k.endsWith(`:${originalMsgId}`)) {
+        origMsg = v;
+        break;
+      }
+    }
+  }
+
+  const editEncKey = getEditMessageSecret(origMsg);
+  if (!editEncKey) {
+    console.warn(`[edit] Received encrypted edit (secretEncryptedMessage) for message ${originalMsgId}, but original message secret is not available in messageStore.`);
+    return null;
+  }
+
+  const mePn = jidNormalizedUser(botSock?.user?.id || botSock?.authState?.creds?.me?.id || '');
+  const meLid = jidNormalizedUser(botSock?.user?.lid || botSock?.authState?.creds?.me?.lid || '');
+  const isFromMe = Boolean(targetKey.fromMe || origMsg?.key?.fromMe || msg.key?.fromMe);
+  const dmRemoteCandidates = [targetJid, msg.key?.remoteJid].filter(
+    (j) => j && (j.endsWith('@s.whatsapp.net') || j.endsWith('@lid'))
+  );
+
+  const msgParticipantJids = [
+    msg.key?.participant,
+    msg.key?.participantLid,
+    msg.key?.participantPn,
+    msg.key?.senderLid,
+    msg.key?.senderPn,
+    msg.participant
+  ];
+  const origParticipantJids = [
+    targetKey.participant,
+    targetKey.participantLid,
+    targetKey.participantPn,
+    origMsg?.key?.participant,
+    origMsg?.key?.participantLid,
+    origMsg?.key?.participantPn,
+    origMsg?.key?.senderLid,
+    origMsg?.key?.senderPn,
+    origMsg?.participant
+  ];
+
+  const senderCandidates = expandJidCandidates([
+    ...origParticipantJids,
+    ...(isFromMe ? [mePn, meLid] : []),
+    ...msgParticipantJids,
+    ...dmRemoteCandidates
+  ]);
+
+  const editorCandidates = expandJidCandidates([
+    ...msgParticipantJids,
+    ...origParticipantJids,
+    ...(isFromMe ? [mePn, meLid] : []),
+    ...dmRemoteCandidates
+  ]);
+
+  const decrypted = tryDecryptMessageEdit(
+    { encPayload: secretEncMsg.encPayload, encIv: secretEncMsg.encIv },
+    { editEncKey, originalMsgId, senderCandidates, editorCandidates }
+  );
+
+  if (!decrypted) {
+    console.warn(`[edit] Failed to authenticate/decrypt secretEncryptedMessage for message ${originalMsgId}`);
+    return null;
+  }
+
+  const normDecrypted = unwrapMessageContent(decrypted) || decrypted;
+  const decProto = normDecrypted.protocolMessage || decrypted.protocolMessage;
+  const editedContent = decProto?.editedMessage
+    ? (unwrapMessageContent(decProto.editedMessage) || decProto.editedMessage)
+    : normDecrypted;
+  const text = extractText(editedContent);
+  if (!text) return null;
+
+  const mergedOriginalKey = {
+    ...cleanMsgKeyFields(origMsg?.key),
+    ...cleanMsgKeyFields(targetKey),
+    id: originalMsgId,
+    remoteJid: targetJid,
+    fromMe: Boolean(targetKey.fromMe ?? origMsg?.key?.fromMe)
+  };
+
+  return {
+    isEdit: true,
+    originalKey: mergedOriginalKey,
+    editedMessage: editedContent,
+    text,
+    timestamp: decProto?.timestampMs
+      ? Number(decProto.timestampMs)
+      : (msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now())
+  };
 }
 
 function getEditedMessageDetails(msg, msgStore = messageStore) {
@@ -664,9 +851,14 @@ function getEditedMessageDetails(msg, msgStore = messageStore) {
     const updateMsg = msg.update.message || msg.update;
     if (!updateMsg) return null;
 
-    const normalized = normalizeMessageContent(updateMsg) || updateMsg;
+    const normalized = unwrapMessageContent(updateMsg) || updateMsg;
+    const secretEncUpdate = normalized.secretEncryptedMessage || updateMsg.secretEncryptedMessage;
+    if (secretEncUpdate && (secretEncUpdate.secretEncType === 2 || secretEncUpdate.secretEncType === 'MESSAGE_EDIT' || secretEncUpdate.encPayload)) {
+      return decryptSecretEditFromMsg(secretEncUpdate, { ...msg, message: updateMsg }, msgStore);
+    }
+
     const protoEdit = normalized.protocolMessage?.editedMessage;
-    const inner = protoEdit ? (normalizeMessageContent(protoEdit) || protoEdit) : normalized;
+    const inner = protoEdit ? (unwrapMessageContent(protoEdit) || protoEdit) : normalized;
     const text = extractText(inner);
     if (!text) return null;
 
@@ -688,20 +880,22 @@ function getEditedMessageDetails(msg, msgStore = messageStore) {
   const rawMsg = msg.message;
   if (!rawMsg) return null;
 
-  const normalized = normalizeMessageContent(rawMsg) || rawMsg;
+  const normalized = unwrapMessageContent(rawMsg) || rawMsg;
   const protocolMsg = normalized.protocolMessage ||
     rawMsg.protocolMessage ||
     rawMsg.editedMessage?.message?.protocolMessage ||
     rawMsg.ephemeralMessage?.message?.protocolMessage ||
     rawMsg.viewOnceMessage?.message?.protocolMessage ||
-    rawMsg.viewOnceMessageV2?.message?.protocolMessage;
+    rawMsg.viewOnceMessageV2?.message?.protocolMessage ||
+    rawMsg.deviceSentMessage?.message?.protocolMessage;
 
   // 1. Check for protocolMessage (standard WhatsApp MESSAGE_EDIT)
   if (protocolMsg && (protocolMsg.type === 14 || protocolMsg.type === 'MESSAGE_EDIT' || protocolMsg.editedMessage)) {
     const originalKey = protocolMsg.key || msg.key;
     const protoEdit = protocolMsg.editedMessage;
-    const editedContent = protoEdit ? (normalizeMessageContent(protoEdit) || protoEdit) : (rawMsg.editedMessage?.message || rawMsg);
+    const editedContent = protoEdit ? (unwrapMessageContent(protoEdit) || protoEdit) : (unwrapMessageContent(rawMsg.editedMessage?.message) || rawMsg.editedMessage?.message || normalized);
     const text = extractText(editedContent);
+    if (!text) return null;
     const timestamp = protocolMsg.timestampMs
       ? Number(protocolMsg.timestampMs)
       : (msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now());
@@ -718,63 +912,12 @@ function getEditedMessageDetails(msg, msgStore = messageStore) {
   // 2. Check for secretEncryptedMessage (WhatsApp E2E encrypted message edit)
   const secretEncMsg = normalized.secretEncryptedMessage || rawMsg.secretEncryptedMessage;
   if (secretEncMsg && (secretEncMsg.secretEncType === 2 || secretEncMsg.secretEncType === 'MESSAGE_EDIT' || secretEncMsg.encPayload)) {
-    const targetKey = secretEncMsg.targetMessageKey || {};
-    const originalMsgId = targetKey.id;
-    const targetJid = targetKey.remoteJid || msg.key?.remoteJid;
-    const origMsg = msgStore && targetJid && originalMsgId ? msgStore.get(storeKey(targetJid, originalMsgId)) : null;
-    const editEncKey = origMsg?.messageSecret || origMsg?.message?.messageContextInfo?.messageSecret || origMsg?.message?.pollCreationMessage?.messageContextInfo?.messageSecret;
-
-    const mePn = jidNormalizedUser(botSock?.user?.id || botSock?.authState?.creds?.me?.id || '');
-    const meLid = jidNormalizedUser(botSock?.user?.lid || botSock?.authState?.creds?.me?.lid || '');
-
-    const senderCandidates = [
-      targetKey.participant,
-      origMsg?.key?.participant,
-      targetKey.fromMe ? mePn : null,
-      targetKey.fromMe ? meLid : null,
-      namesStore.resolveCanonicalId(targetKey.participant || origMsg?.key?.participant),
-      namesStore.getPnByLid(targetKey.participant || origMsg?.key?.participant),
-      targetJid?.endsWith('@s.whatsapp.net') || targetJid?.endsWith('@lid') ? targetJid : null
-    ].filter(Boolean);
-
-    const editorCandidates = [
-      msg.key?.participant,
-      targetKey.participant,
-      msg.key?.fromMe ? mePn : null,
-      msg.key?.fromMe ? meLid : null,
-      namesStore.resolveCanonicalId(msg.key?.participant),
-      namesStore.getPnByLid(msg.key?.participant),
-      targetJid?.endsWith('@s.whatsapp.net') || targetJid?.endsWith('@lid') ? targetJid : null
-    ].filter(Boolean);
-
-    if (editEncKey) {
-      const decrypted = tryDecryptMessageEdit(
-        { encPayload: secretEncMsg.encPayload, encIv: secretEncMsg.encIv },
-        { editEncKey, originalMsgId, senderCandidates, editorCandidates }
-      );
-      if (decrypted) {
-        const editedContent = decrypted.protocolMessage?.editedMessage || decrypted;
-        const text = extractText(editedContent);
-        return {
-          isEdit: true,
-          originalKey: targetKey,
-          editedMessage: editedContent,
-          text,
-          timestamp: decrypted.protocolMessage?.timestampMs
-            ? Number(decrypted.protocolMessage.timestampMs)
-            : (msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now())
-        };
-      } else {
-        console.warn(`[edit] Failed to authenticate/decrypt secretEncryptedMessage for message ${originalMsgId}`);
-      }
-    } else {
-      console.warn(`[edit] Received encrypted edit (secretEncryptedMessage) for message ${originalMsgId}, but original message secret is not available in messageStore.`);
-    }
+    return decryptSecretEditFromMsg(secretEncMsg, msg, msgStore);
   }
 
   // 3. Check for editedMessage wrapper without protocolMessage
   if (rawMsg.editedMessage?.message || normalized.editedMessage) {
-    const innerContent = normalizeMessageContent(rawMsg.editedMessage?.message || rawMsg.editedMessage || normalized.editedMessage) || (rawMsg.editedMessage?.message || rawMsg.editedMessage);
+    const innerContent = unwrapMessageContent(rawMsg.editedMessage?.message || rawMsg.editedMessage || normalized.editedMessage) || (rawMsg.editedMessage?.message || rawMsg.editedMessage);
     const text = extractText(innerContent);
     if (text) {
       return {
@@ -799,7 +942,7 @@ function cleanupRecentEditsCache() {
   }
 }
 
-async function handleEditedMessage(sock, msg, editDetails, groupName) {
+async function handleEditedMessage(sock, msg, editDetails, groupName, msgStore = messageStore) {
   if (!editDetails || !editDetails.text) return;
 
   const targetKey = editDetails.originalKey || msg.key;
@@ -826,9 +969,25 @@ async function handleEditedMessage(sock, msg, editDetails, groupName) {
     recordName(targetJid, sender, targetJid.endsWith('@s.whatsapp.net') ? targetJid : null);
   }
 
-  // Update in Baileys message store
-  if (editDetails.editedMessage) {
-    messageStore.set(storeKey(targetJid, targetId), editDetails.editedMessage);
+  // Update in Baileys message store while preserving key and messageSecret for future edits
+  if (editDetails.editedMessage && msgStore) {
+    const sKey = storeKey(targetJid, targetId);
+    const existing = msgStore.get(sKey);
+    if (existing && typeof existing === 'object' && (existing.key || existing.messageSecret || existing.message)) {
+      const existingNormalized = existing.message ? (unwrapMessageContent(existing.message) || existing.message) : null;
+      const existingContextInfo = existingNormalized?.messageContextInfo || existing.message?.messageContextInfo || existing.messageContextInfo;
+      const existingSecret = existing.messageSecret || getEditMessageSecret(existing);
+      msgStore.set(sKey, {
+        ...existing,
+        ...(existingSecret ? { messageSecret: existingSecret } : {}),
+        message: {
+          ...editDetails.editedMessage,
+          ...(existingContextInfo && !editDetails.editedMessage.messageContextInfo ? { messageContextInfo: existingContextInfo } : {})
+        }
+      });
+    } else {
+      msgStore.set(sKey, editDetails.editedMessage);
+    }
   }
 
   // Update in persistent chat history
@@ -850,8 +1009,8 @@ async function handleEditedMessage(sock, msg, editDetails, groupName) {
   const syntheticMsg = {
     ...msg,
     key: {
-      ...msg.key,
-      ...targetKey,
+      ...cleanMsgKeyFields(msg.key),
+      ...cleanMsgKeyFields(targetKey),
       id: targetId,
       remoteJid: targetJid
     },
@@ -1161,7 +1320,13 @@ async function startBot() {
 
       // Always cache incoming messages in messageStore so their messageSecret is available for decrypting edits
       if (msg.key?.id) {
-        messageStore.set(storeKey(remoteJid, msg.key.id), msg);
+        const sKey = storeKey(remoteJid, msg.key.id);
+        const existing = messageStore.get(sKey);
+        if (existing && getEditMessageSecret(existing) && !getEditMessageSecret(msg)) {
+          // Preserve existing messageSecret if a subsequent update for the same ID lacks it
+        } else {
+          messageStore.set(sKey, msg);
+        }
       }
 
       const isGroup = remoteJid.endsWith('@g.us');

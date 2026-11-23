@@ -7,8 +7,34 @@ const {
   decryptMessageEdit
 } = require('../index');
 const messageHistory = require('../lib/messageHistory');
+const scvcc = require('../lib/scvcc');
+const groupsConfig = require('../lib/groupsConfig');
 const { proto } = require('@whiskeysockets/baileys');
 const { aesEncryptGCM, hmacSign } = require('@whiskeysockets/baileys/lib/Utils/crypto');
+
+function buildEncryptedEditPayload({ originalMsgId, origSender, editor, editedConversation, messageSecret, timestampMs = 1700000000000 }) {
+  const plaintextMsg = {
+    protocolMessage: {
+      key: { id: originalMsgId, fromMe: false, remoteJid: 'test_chat_edited@g.us' },
+      type: 14,
+      editedMessage: { conversation: editedConversation },
+      timestampMs
+    }
+  };
+  const plaintext = proto.Message.encode(proto.Message.fromObject(plaintextMsg)).finish();
+  const iv = Buffer.alloc(12, 0x12);
+  const sign = Buffer.concat([
+    Buffer.from(originalMsgId),
+    Buffer.from(origSender),
+    Buffer.from(editor),
+    Buffer.from('Message Edit'),
+    new Uint8Array([1])
+  ]);
+  const key0 = hmacSign(messageSecret, new Uint8Array(32), 'sha256');
+  const encKey = hmacSign(sign, key0, 'sha256');
+  const encPayload = aesEncryptGCM(plaintext, encKey, iv, Buffer.alloc(0));
+  return { encPayload, encIv: iv };
+}
 
 describe('editedMessages', () => {
   const testChatId = 'test_chat_edited@g.us';
@@ -165,6 +191,72 @@ describe('editedMessages', () => {
       assert.equal(details.isEdit, true);
       assert.equal(details.originalKey.id, originalMsgId);
       assert.equal(details.text, 'Decrypted edited text from PI');
+    });
+
+    it('should decrypt secretEncryptedMessage when original message is wrapped in ephemeralMessage and keys have device suffixes or participantPn', () => {
+      const originalMsgId = 'orig_ephemeral_1';
+      const normPn = '16028031085@s.whatsapp.net';
+      const messageSecret = Buffer.alloc(32, 0x55);
+
+      const mockStore = new Map();
+      mockStore.set(`${testChatId}:${originalMsgId}`, {
+        key: { id: originalMsgId, remoteJid: testChatId, participant: '999988887777@lid', participantPn: normPn },
+        message: {
+          ephemeralMessage: {
+            message: {
+              conversation: '!webacm',
+              messageContextInfo: { messageSecret }
+            }
+          }
+        }
+      });
+
+      const { encPayload, encIv } = buildEncryptedEditPayload({
+        originalMsgId,
+        origSender: normPn,
+        editor: normPn,
+        editedConversation: '!webcam',
+        messageSecret
+      });
+
+      // Case 1: device-suffixed participant and omitted targetMessageKey.participant
+      const secretEncMsg = {
+        key: { id: 'secret_enc_ephemeral', remoteJid: testChatId, participant: '999988887777:4@lid', participantPn: '16028031085:4@s.whatsapp.net' },
+        message: {
+          ephemeralMessage: {
+            message: {
+              secretEncryptedMessage: {
+                targetMessageKey: { id: originalMsgId, remoteJid: testChatId },
+                encPayload,
+                encIv,
+                secretEncType: 2
+              }
+            }
+          }
+        }
+      };
+
+      const details = getEditedMessageDetails(secretEncMsg, mockStore);
+      assert.ok(details, 'Should decrypt ephemeral secretEncryptedMessage with normalized participantPn');
+      assert.equal(details.text, '!webcam');
+      assert.equal(details.originalKey.participant, '999988887777@lid');
+
+      // Case 2: Delivered via messages.update event wrapper
+      const updateDetails = getEditedMessageDetails({
+        key: { id: 'secret_enc_ephemeral', remoteJid: testChatId, participant: '999988887777:4@lid', participantPn: normPn },
+        update: {
+          message: {
+            secretEncryptedMessage: {
+              targetMessageKey: { id: originalMsgId, remoteJid: testChatId },
+              encPayload,
+              encIv,
+              secretEncType: 2
+            }
+          }
+        }
+      }, mockStore);
+      assert.ok(updateDetails, 'Should decrypt secretEncryptedMessage delivered via messages.update');
+      assert.equal(updateDetails.text, '!webcam');
     });
   });
 
@@ -345,6 +437,100 @@ describe('editedMessages', () => {
       // Re-triggering the same edit immediately should be dropped by deduplication
       await handleEditedMessage(mockSock, editMsg, details, 'Test Group');
       assert.equal(sentReplies.length, 1);
+    });
+
+    it('should execute !webcam when a typoed webcam command is edited multiple times via secretEncryptedMessage', async () => {
+      const origGetWebcam = scvcc.getCourtWebcamSnapshot;
+      const origIsCourtBookingEnabled = groupsConfig.isCourtBookingEnabled;
+      const mockImageBuf = Buffer.from('fake-webcam-jpeg');
+      scvcc.getCourtWebcamSnapshot = async () => ({ success: true, imageBuffer: mockImageBuf });
+      groupsConfig.isCourtBookingEnabled = () => true;
+
+      try {
+        const sentReplies = [];
+        const mockSock = {
+          user: { id: '14084099336:3@s.whatsapp.net', lid: '115694289027280:3@lid' },
+          sendMessage: async (jid, content) => {
+            sentReplies.push({ jid, content });
+            return { key: { id: `reply_webcam_${sentReplies.length}` } };
+          }
+        };
+
+        const originalMsgId = 'orig_webcam_typo_1';
+        const senderLid = '777666555444@lid';
+        const messageSecret = Buffer.alloc(32, 0x77);
+        const mockStore = new Map();
+        mockStore.set(`${testChatId}:${originalMsgId}`, {
+          key: { id: originalMsgId, remoteJid: testChatId, participant: senderLid },
+          message: {
+            ephemeralMessage: {
+              message: {
+                conversation: '!webacm',
+                messageContextInfo: { messageSecret }
+              }
+            }
+          }
+        });
+
+        // Edit 1: typo still not right ('!webcm')
+        const enc1 = buildEncryptedEditPayload({
+          originalMsgId,
+          origSender: senderLid,
+          editor: senderLid,
+          editedConversation: '!webcm',
+          messageSecret,
+          timestampMs: 1700000001000
+        });
+        const editMsg1 = {
+          key: { id: 'edit_webcam_1', remoteJid: testChatId, participant: `${senderLid.split('@')[0]}:2@lid` },
+          pushName: 'Alice',
+          message: {
+            secretEncryptedMessage: {
+              targetMessageKey: { id: originalMsgId, remoteJid: testChatId },
+              ...enc1,
+              secretEncType: 2
+            }
+          }
+        };
+        const details1 = getEditedMessageDetails(editMsg1, mockStore);
+        assert.ok(details1);
+        assert.equal(details1.text, '!webcm');
+        await handleEditedMessage(mockSock, editMsg1, details1, 'Test Group', mockStore);
+        assert.equal(sentReplies.length, 0);
+
+        // Edit 2: fixed typo ('!webcam!') — must still find messageSecret preserved in mockStore
+        const enc2 = buildEncryptedEditPayload({
+          originalMsgId,
+          origSender: senderLid,
+          editor: senderLid,
+          editedConversation: '!webcam!',
+          messageSecret,
+          timestampMs: 1700000002000
+        });
+        const editMsg2 = {
+          key: { id: 'edit_webcam_2', remoteJid: testChatId, participant: `${senderLid.split('@')[0]}:2@lid` },
+          pushName: 'Alice',
+          message: {
+            secretEncryptedMessage: {
+              targetMessageKey: { id: originalMsgId, remoteJid: testChatId },
+              ...enc2,
+              secretEncType: 2
+            }
+          }
+        };
+        const details2 = getEditedMessageDetails(editMsg2, mockStore);
+        assert.ok(details2, 'Second secretEncryptedMessage edit must still decrypt using preserved messageSecret');
+        assert.equal(details2.text, '!webcam!');
+        await handleEditedMessage(mockSock, editMsg2, details2, 'Test Group', mockStore);
+
+        assert.equal(sentReplies.length, 1);
+        assert.equal(sentReplies[0].jid, testChatId);
+        assert.equal(sentReplies[0].content.image, mockImageBuf);
+        assert.match(sentReplies[0].content.caption, /SCVCC Tennis Court Webcam/);
+      } finally {
+        scvcc.getCourtWebcamSnapshot = origGetWebcam;
+        groupsConfig.isCourtBookingEnabled = origIsCourtBookingEnabled;
+      }
     });
   });
 });
