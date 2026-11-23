@@ -88,6 +88,7 @@ const {
   routeCommand,
   executeTool,
   isAddressedToBot,
+  isLikelyQuestion,
   stripLeadingTrigger,
   groupCommands,
   courtCommands,
@@ -465,12 +466,15 @@ function buildContextBlurb(chatId) {
 /**
  * Calls Claude with tools, chat history, and live context using prompt caching.
  */
-async function callClaude(sock, chatId, sender, promptText, msg) {
+async function callClaude(sock, chatId, sender, promptText, msg, options = {}) {
+  const quotedOnlyIfKnown = Boolean(options?.quotedOnlyIfKnown);
+  const context = options?.context || getPollContext();
+  const msgStore = context.messageStore || messageStore;
   const mePn = jidNormalizedUser(sock?.user?.id || sock?.authState?.creds?.me?.id || '');
   const meLid = jidNormalizedUser(sock?.user?.lid || sock?.authState?.creds?.me?.lid || '');
   const botJids = [mePn, meLid].filter(Boolean);
 
-  const quotedCtx = extractQuotedContext(msg, messageStore, botJids);
+  const quotedCtx = extractQuotedContext(msg, msgStore, botJids, context.activePolls || activePolls);
   let effectivePrompt = promptText;
   if (quotedCtx && quotedCtx.quotedText && !promptText.startsWith('[Replying to')) {
     effectivePrompt = `[Replying to ${quotedCtx.quotedSenderName}: "${quotedCtx.quotedText}"]\n${promptText}`;
@@ -491,8 +495,21 @@ async function callClaude(sock, chatId, sender, promptText, msg) {
       text: buildContextBlurb(chatId)
     }
   ];
+  if (quotedOnlyIfKnown) {
+    systemBlocks.push({
+      type: 'text',
+      text:
+        'IMPORTANT SILENT-IGNORE RULE FOR THIS MESSAGE:\n' +
+        'The user replied to/quoted a message or poll posted by Tenbot WITHOUT explicitly addressing @tenbot.\n' +
+        'ONLY respond if the user is genuinely asking a question whose answer you actually know from the tennis group context, ' +
+        'active/recurring polls, match lineups, court availability/bookings, player ratings, player activity, weather, or group chat history ' +
+        '(you may call tools first to look up the answer if needed).\n' +
+        'If the user is NOT asking a question for the bot (e.g. casual comment, acknowledgment, statement, or coordinating logistics like rides, balls, or running late with other players), ' +
+        'OR if you do NOT know the answer to their question from your data, tools, or chat history, ' +
+        'you MUST output EXACTLY `[NO_REPLY]` with no other text, explanation, or apology.'
+    });
+  }
 
-  const context = getPollContext();
   const makeApiCall = async (msgs, toolsToUse = CACHED_CLAUDE_TOOLS) => {
     return await anthropic.callAnthropicMessages({
       messages: msgs,
@@ -539,7 +556,12 @@ async function callClaude(sock, chatId, sender, promptText, msg) {
     try {
       const finalPromptMessages = [
         ...currentMessages,
-        { role: 'user', content: 'Please provide a clear and direct answer to the user based on the information retrieved.' }
+        {
+          role: 'user',
+          content: quotedOnlyIfKnown
+            ? 'Based on the information retrieved, answer ONLY if it directly answers the user\'s question with information you actually know; otherwise respond with `[NO_REPLY]`.'
+            : 'Please provide a clear and direct answer to the user based on the information retrieved.'
+        }
       ];
       const finalData = await makeApiCall(finalPromptMessages, null);
       replyText = anthropic.extractTextFromResponse(finalData);
@@ -548,7 +570,12 @@ async function callClaude(sock, chatId, sender, promptText, msg) {
     }
   }
 
-  if (!replyText) {
+  if (quotedOnlyIfKnown) {
+    if (!replyText || /\[NO_REPLY\]/i.test(replyText) || /^\s*NO_REPLY\s*$/i.test(replyText)) {
+      console.log(`[quoted] Ignored unaddressed quote in ${chatId} from ${sender}: not a known question.`);
+      return null;
+    }
+  } else if (!replyText) {
     console.warn(`⚠️ [callClaude] Empty text response from Claude. stop_reason=${data?.stop_reason}, blocks=${(data?.content || []).map((b) => b.type).join(',')}`);
     replyText = "Sorry, I couldn't process that request right now. Please try again in a moment or use specific commands like !courts, !poll, or !help.";
   }
@@ -604,8 +631,8 @@ async function handleGroupLineup(sock, text, chatId, sender, msg, context) {
 /**
  * Central response router for incoming messages.
  */
-async function getResponse(sock, rawText, chatId, sender, msg) {
-  const context = getPollContext();
+async function getResponse(sock, rawText, chatId, sender, msg, contextOverride = null) {
+  const context = contextOverride || getPollContext();
 
   const mePn = jidNormalizedUser(sock?.user?.id || sock?.authState?.creds?.me?.id || '');
   const meLid = jidNormalizedUser(sock?.user?.lid || sock?.authState?.creds?.me?.lid || '');
@@ -613,9 +640,13 @@ async function getResponse(sock, rawText, chatId, sender, msg) {
 
   const isDM = !chatId.endsWith('@g.us');
   const text = (rawText || '').trim();
-  const { addressed, promptText } = isDM
-    ? { addressed: true, promptText: stripLeadingTrigger(text) }
-    : isAddressedToBot(text, msg, botJids);
+  const addrResult = isDM
+    ? { addressed: true, explicitlyAddressed: true, isQuotingBot: false, promptText: stripLeadingTrigger(text) }
+    : isAddressedToBot(text, msg, botJids, TRIGGER_PREFIX, context);
+  const { addressed, promptText } = addrResult;
+  const explicitlyAddressed = Boolean(addrResult.explicitlyAddressed);
+  const isQuotingBot = Boolean(addrResult.isQuotingBot);
+  const isQuotedBotUnaddressed = !isDM && isQuotingBot && !explicitlyAddressed;
 
   // 1. Check structured commands via modular router
   const normalizedPromptText = normalizeCommandDashes(promptText);
@@ -626,7 +657,7 @@ async function getResponse(sock, rawText, chatId, sender, msg) {
   }
 
   // 2. Manual published matchup / lineup detection in group messages, if addressed use regular LLM detection below
-  if (!addressed) {
+  if (!explicitlyAddressed) {
     const lineupHandled = await handleGroupLineup(sock, text, chatId, sender, msg, context);
     if (lineupHandled) {
       return null;
@@ -638,6 +669,19 @@ async function getResponse(sock, rawText, chatId, sender, msg) {
     return null;
   }
   if (!normalizedPromptText) return null;
+
+  // 3.5 Unaddressed quotes of bot messages or bot-created polls: only respond to questions the bot knows
+  if (isQuotedBotUnaddressed) {
+    if (!isLikelyQuestion(normalizedPromptText)) {
+      return null;
+    }
+    try {
+      return await callClaude(sock, chatId, sender, promptText, msg, { quotedOnlyIfKnown: true, context });
+    } catch (err) {
+      console.error('LLM call failed (quoted bot message):', err);
+      return null;
+    }
+  }
 
   // Direct recurring poll phrase
   const directRecurringParsed = recurringPollsModule.parseRecurringPollText(normalizedPromptText);
@@ -666,7 +710,7 @@ async function getResponse(sock, rawText, chatId, sender, msg) {
 
   // LLM fallback
   try {
-    return await callClaude(sock, chatId, sender, promptText, msg);
+    return await callClaude(sock, chatId, sender, promptText, msg, { context });
   } catch (err) {
     console.error('LLM call failed:', err);
     return "Sorry, I couldn't come up with a reply just now.";

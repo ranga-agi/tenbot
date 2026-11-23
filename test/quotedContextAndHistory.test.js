@@ -2,7 +2,9 @@ const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const messageHistory = require('../lib/messageHistory');
 const { sendMessageAndRecord } = require('../lib/botMessage');
-const { extractQuotedContext, isAddressedToBot } = require('../lib/commands/index');
+const { extractQuotedContext, isAddressedToBot, isQuotingBotMessageOrPoll, isLikelyQuestion } = require('../lib/commands/index');
+const { getResponse } = require('../index');
+const anthropic = require('../lib/anthropic');
 const pollCommands = require('../lib/commands/poll');
 const namesStore = require('../lib/names');
 
@@ -176,6 +178,151 @@ describe('Quoted Message Context & Bot Message Recording', () => {
       const res = isAddressedToBot('Why didn’t you mention my name?', msg, botJids);
       assert.equal(res.addressed, true);
       assert.equal(res.promptText, 'Why didn’t you mention my name?');
+    });
+
+    it('should distinguish explicit @tenbot addressing from quote-only triggers and recognize bot-created polls by stanzaId', () => {
+      const activePolls = new Map([
+        ['bot_poll_1', { remoteJid: testChatId, name: 'Tomorrow 7pm', isManual: false }],
+        ['manual_poll_1', { remoteJid: testChatId, name: 'Sunday Hit', isManual: true }]
+      ]);
+      const ctx = { activePolls, messageStore: new Map() };
+
+      const botPollQuoteMsg = {
+        key: { remoteJid: testChatId, id: 'm_q_bot_poll' },
+        message: {
+          extendedTextMessage: {
+            text: 'Who is playing?',
+            contextInfo: { stanzaId: 'bot_poll_1' }
+          }
+        }
+      };
+      assert.equal(isQuotingBotMessageOrPoll(botPollQuoteMsg, botJids, ctx), true);
+      const botPollAddr = isAddressedToBot('Who is playing?', botPollQuoteMsg, botJids, '@tenbot', ctx);
+      assert.equal(botPollAddr.addressed, true);
+      assert.equal(botPollAddr.isQuotingBot, true);
+      assert.equal(botPollAddr.explicitlyAddressed, false);
+
+      const manualPollQuoteMsg = {
+        key: { remoteJid: testChatId, id: 'm_q_manual_poll' },
+        message: {
+          extendedTextMessage: {
+            text: 'Who is playing?',
+            contextInfo: { stanzaId: 'manual_poll_1', participant: '14083334444@s.whatsapp.net' }
+          }
+        }
+      };
+      assert.equal(isQuotingBotMessageOrPoll(manualPollQuoteMsg, botJids, ctx), false);
+      const manualAddr = isAddressedToBot('Who is playing?', manualPollQuoteMsg, botJids, '@tenbot', ctx);
+      assert.equal(manualAddr.addressed, false);
+
+      const explicitQuoteMsg = {
+        key: { remoteJid: testChatId, id: 'm_q_explicit' },
+        message: {
+          extendedTextMessage: {
+            text: '@tenbot thanks!',
+            contextInfo: { stanzaId: 'bot_poll_1', participant: '16693124812@s.whatsapp.net' }
+          }
+        }
+      };
+      const explicitAddr = isAddressedToBot('@tenbot thanks!', explicitQuoteMsg, botJids, '@tenbot', ctx);
+      assert.equal(explicitAddr.addressed, true);
+      assert.equal(explicitAddr.explicitlyAddressed, true);
+      assert.equal(explicitAddr.isQuotingBot, true);
+    });
+  });
+
+  describe('isLikelyQuestion & quoted bot reply gating in getResponse', () => {
+    it('identifies questions vs non-question comments', () => {
+      assert.equal(isLikelyQuestion('Thanks!'), false);
+      assert.equal(isLikelyQuestion("I'll bring extra balls"), false);
+      assert.equal(isLikelyQuestion('I can bring new balls'), false);
+      assert.equal(isLikelyQuestion('Running 10 mins late'), false);
+      assert.equal(isLikelyQuestion('Count me out'), false);
+      assert.equal(isLikelyQuestion('Who is playing?'), true);
+      assert.equal(isLikelyQuestion('Who is playing'), true);
+      assert.equal(isLikelyQuestion('Are courts booked'), true);
+      assert.equal(isLikelyQuestion('I voted earlier, why am I on waitlist'), true);
+    });
+
+    it('ignores non-question replies quoting a bot message or bot-created poll without calling Claude', async () => {
+      const origCall = anthropic.callAnthropicMessages;
+      let apiCalls = 0;
+      anthropic.callAnthropicMessages = async () => {
+        apiCalls++;
+        return { content: [{ type: 'text', text: 'Should not be called' }] };
+      };
+      try {
+        const sock = { user: { id: '16693124812@s.whatsapp.net', lid: '24104010813588@lid' } };
+        const ctx = {
+          activePolls: new Map([['bot_poll_1', { remoteJid: testChatId, name: 'Tomorrow 7pm', isManual: false }]]),
+          messageStore: new Map(),
+          recurringPolls: new Map()
+        };
+        const quoteMsg = {
+          key: { remoteJid: testChatId, id: 'reply_chatter' },
+          message: {
+            extendedTextMessage: {
+              text: 'I can bring extra balls',
+              contextInfo: { stanzaId: 'bot_poll_1', participant: '16693124812@s.whatsapp.net' }
+            }
+          }
+        };
+        const res = await getResponse(sock, 'I can bring extra balls', testChatId, 'Conrad', quoteMsg, ctx);
+        assert.equal(res, null);
+        assert.equal(apiCalls, 0);
+      } finally {
+        anthropic.callAnthropicMessages = origCall;
+      }
+    });
+
+    it('suppresses reply when quoting a bot poll with an unknown question ([NO_REPLY]), but replies to known questions or explicit @tenbot', async () => {
+      const origCall = anthropic.callAnthropicMessages;
+      let seenSystemTexts = [];
+      anthropic.callAnthropicMessages = async ({ system, messages }) => {
+        seenSystemTexts = (system || []).map((b) => b.text || '');
+        const lastUser = messages[messages.length - 1]?.content || '';
+        if (/bringing balls/i.test(lastUser)) {
+          return { content: [{ type: 'text', text: '[NO_REPLY]' }] };
+        }
+        if (/why wasn't I mentioned/i.test(lastUser)) {
+          return { content: [{ type: 'text', text: 'You voted after the reminder was sent.' }] };
+        }
+        return { content: [{ type: 'text', text: 'You are welcome!' }] };
+      };
+
+      try {
+        const sock = { user: { id: '16693124812@s.whatsapp.net', lid: '24104010813588@lid' } };
+        const ctx = {
+          activePolls: new Map([['bot_poll_1', { remoteJid: testChatId, name: 'Tomorrow 7pm', isManual: false }]]),
+          messageStore: new Map(),
+          recurringPolls: new Map()
+        };
+
+        const unknownQMsg = {
+          key: { remoteJid: testChatId, id: 'reply_unknown_q' },
+          message: { extendedTextMessage: { text: 'Who is bringing balls?', contextInfo: { stanzaId: 'bot_poll_1' } } }
+        };
+        const unknownRes = await getResponse(sock, 'Who is bringing balls?', testChatId, 'Conrad', unknownQMsg, ctx);
+        assert.equal(unknownRes, null);
+        assert.ok(seenSystemTexts.some((t) => t.includes('IMPORTANT SILENT-IGNORE RULE')));
+
+        const knownQMsg = {
+          key: { remoteJid: testChatId, id: 'reply_known_q' },
+          message: { extendedTextMessage: { text: "Why wasn't I mentioned?", contextInfo: { stanzaId: 'bot_msg_1', participant: '16693124812@s.whatsapp.net', quotedMessage: { conversation: 'Reminder...' } } } }
+        };
+        const knownRes = await getResponse(sock, "Why wasn't I mentioned?", testChatId, 'Conrad', knownQMsg, ctx);
+        assert.equal(knownRes, 'You voted after the reminder was sent.');
+
+        const explicitMsg = {
+          key: { remoteJid: testChatId, id: 'reply_explicit' },
+          message: { extendedTextMessage: { text: '@tenbot thanks!', contextInfo: { stanzaId: 'bot_msg_1', participant: '16693124812@s.whatsapp.net' } } }
+        };
+        const explicitRes = await getResponse(sock, '@tenbot thanks!', testChatId, 'Conrad', explicitMsg, ctx);
+        assert.equal(explicitRes, 'You are welcome!');
+        assert.ok(!seenSystemTexts.some((t) => t.includes('IMPORTANT SILENT-IGNORE RULE')));
+      } finally {
+        anthropic.callAnthropicMessages = origCall;
+      }
     });
   });
 
