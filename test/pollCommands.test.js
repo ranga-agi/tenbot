@@ -5280,6 +5280,129 @@ describe('pollCommands', () => {
       // recentTimedPoll passed playAt, so status should become 'expired'
       assert.equal(recentTimedPoll.status, "expired");
     });
+
+    it("should expire untimed manual polls with today/tomorrow/weekday/date in title once the day passes", async () => {
+      // Created Monday Nov 23, 2026 at 10:00 AM PST (18:00:00Z)
+      const createdAt = "2026-11-23T18:00:00.000Z";
+
+      const todayPoll = {
+        name: "Tennis today",
+        isManual: true,
+        status: "active",
+        remoteJid: "group1@g.us",
+        when: "Tennis today",
+        dayWord: null,
+        playAt: null,
+        createdAt,
+        voteBuffer: new Map()
+      };
+      const tomorrowPoll = {
+        name: "Tennis tomorrow",
+        isManual: true,
+        status: "active",
+        remoteJid: "group1@g.us",
+        when: "Tennis tomorrow",
+        dayWord: "tomorrow",
+        playAt: null,
+        createdAt,
+        voteBuffer: new Map()
+      };
+      const fridayPoll = {
+        name: "Friday doubles",
+        isManual: true,
+        status: "active",
+        remoteJid: "group1@g.us",
+        when: "Friday",
+        dayWord: "Friday",
+        playAt: null,
+        createdAt,
+        voteBuffer: new Map()
+      };
+      const datePoll = {
+        name: "Tennis 11/25",
+        isManual: true,
+        status: "active",
+        remoteJid: "group1@g.us",
+        when: "Tennis 11/25",
+        dayWord: null,
+        playAt: null,
+        createdAt,
+        voteBuffer: new Map()
+      };
+      const undatedPoll = {
+        name: "Tennis 4 spots",
+        isManual: true,
+        status: "active",
+        remoteJid: "group1@g.us",
+        when: "Tennis 4 spots",
+        dayWord: null,
+        playAt: null,
+        createdAt,
+        voteBuffer: new Map()
+      };
+
+      const activePolls = new Map([
+        ["p_today", todayPoll],
+        ["p_tomorrow", tomorrowPoll],
+        ["p_friday", fridayPoll],
+        ["p_date", datePoll],
+        ["p_undated", undatedPoll]
+      ]);
+      const context = { activePolls, messageStore: new Map(), latestPollIdByChat: new Map(), persistPolls: () => {} };
+
+      // Still Monday Nov 23, 11:55 PM PST (2026-11-24T07:55:00Z): nothing expired yet
+      const monLate = new Date("2026-11-24T07:55:00.000Z").getTime();
+      cleanupExpiredPolls(context, monLate);
+      assert.equal(todayPoll.status, "active");
+      assert.equal(tomorrowPoll.status, "active");
+      assert.equal(fridayPoll.status, "active");
+      assert.equal(datePoll.status, "active");
+      assert.equal(undatedPoll.status, "active");
+
+      // Tuesday Nov 24, 12:05 AM PST (2026-11-24T08:05:00Z): "today" poll has expired, "tomorrow" is still active
+      const tueEarly = new Date("2026-11-24T08:05:00.000Z").getTime();
+      cleanupExpiredPolls(context, tueEarly);
+      assert.equal(todayPoll.status, "expired");
+      assert.equal(tomorrowPoll.status, "active");
+      assert.equal(fridayPoll.status, "active");
+      assert.equal(datePoll.status, "active");
+      assert.equal(undatedPoll.status, "active");
+
+      // Wednesday Nov 25, 12:05 AM PST (2026-11-25T08:05:00Z): "tomorrow" poll expires too (via checkAndSendPollReminders as well)
+      const wedEarly = new Date("2026-11-25T08:05:00.000Z").getTime();
+      await checkAndSendPollReminders({ user: { id: "bot@s.whatsapp.net" }, sendMessage: async () => {} }, context, wedEarly);
+      assert.equal(tomorrowPoll.status, "expired");
+      assert.equal(datePoll.status, "active"); // Nov 25 hasn't ended yet
+      assert.equal(fridayPoll.status, "active");
+      assert.equal(undatedPoll.status, "active");
+
+      // Thursday Nov 26, 12:05 AM PST (2026-11-26T08:05:00Z): "11/25" poll expires
+      const thuEarly = new Date("2026-11-26T08:05:00.000Z").getTime();
+      cleanupExpiredPolls(context, thuEarly);
+      assert.equal(datePoll.status, "expired");
+      assert.equal(fridayPoll.status, "active");
+      assert.equal(undatedPoll.status, "active");
+
+      // !upcomingpolls hides polls whose day has passed even before cleanup runs, while retaining Friday and undated polls
+      const yesterdayIso = new Date(Date.now() - 26 * 3600 * 1000).toISOString();
+      const statusCheckPoll = {
+        name: "Tennis today",
+        isManual: true,
+        status: "active",
+        remoteJid: "group1@g.us",
+        when: "Tennis today",
+        playAt: null,
+        createdAt: yesterdayIso,
+        voteBuffer: new Map()
+      };
+      const upcomingOut = pollStatusText("group1@g.us", { upcomingOnly: true }, {
+        activePolls: new Map([["p_today_uncleaned", statusCheckPoll], ["p_undated", undatedPoll]]),
+        recurringPolls: new Map(),
+        messageStore: new Map()
+      });
+      assert.doesNotMatch(upcomingOut, /p_today_uncleaned/);
+      assert.match(upcomingOut, /p_undated/);
+    });
   });
   describe('max-courts option for auto polls', () => {
     it('Example 1: max-courts=3 with courts 2 & 3 prebooked and court 1 available -> 3 courts, 12 slots', async () => {
@@ -8411,6 +8534,116 @@ describe('pollCommands', () => {
       ]);
       const out = pollStatusText("group1@g.us", { activeOnly: true }, { activePolls, recurringPolls: new Map() });
       assert.match(out, /Created: unknown/);
+    });
+  });
+
+  describe("Poll Title display on a separate line in pollStatusText", () => {
+    it("shows Title: on its own line separate from Poll ID for manual, fixed, opt-in, multi-time, and split polls", () => {
+      const activePolls = new Map([
+        ["p_manual", {
+          remoteJid: "group1@g.us",
+          isManual: true,
+          name: "Friday evening 6pm doubles?",
+          when: "Friday 6pm",
+          status: "active",
+          options: ["In", "Out"],
+          voteBuffer: new Map()
+        }],
+        ["p_manual_custom", {
+          remoteJid: "group1@g.us",
+          isManual: true,
+          name: "Sunday Hit",
+          title: "Manual Club Hit",
+          when: "Sunday",
+          status: "active",
+          options: ["9am", "10am"],
+          voteBuffer: new Map()
+        }],
+        ["p_fixed_noncustom", {
+          remoteJid: "group1@g.us",
+          type: "fixed",
+          size: 4,
+          name: "🎾 Tomorrow 7pm (4 slots / 4)\n\nCourt 1 - 7:00 PM",
+          when: "Tomorrow 7pm",
+          status: "active",
+          options: ["Player 1", "Player 2", "Player 3", "Player 4"],
+          voteBuffer: new Map()
+        }],
+        ["p_optin_noncustom", {
+          remoteJid: "group1@g.us",
+          type: "opt_in",
+          size: 4,
+          slotLimit: 4,
+          name: "🎾 Saturday 8am (4 spots — Vote Yes/No)",
+          when: "Saturday 8am",
+          status: "active",
+          options: ["Yes", "No"],
+          voteBuffer: new Map()
+        }],
+        ["p_multi_noncustom", {
+          remoteJid: "group1@g.us",
+          type: "multi_time",
+          name: "🎾 Sunday (Vote for time(s))",
+          when: "Sunday 8am",
+          status: "active",
+          timeSlots: [{ id: "slot_8am", label: "8 AM", slotLimit: 4, status: "active" }],
+          options: ["8 AM", "No"],
+          voteBuffer: new Map()
+        }],
+        ["p_split_1", {
+          remoteJid: "group1@g.us",
+          type: "fixed",
+          size: 12,
+          parentPollId: "sess_title_1",
+          partNumber: 1,
+          totalParts: 2,
+          sessionTotalSize: 16,
+          name: "🎾 Friday 7pm (Part 1/2: Spots 1–12)\n\nCourt 1 - 7:00 PM",
+          when: "Friday 7pm",
+          status: "active",
+          options: Array.from({ length: 12 }, (_, i) => `Player ${i + 1}`),
+          voteBuffer: new Map()
+        }],
+        ["p_split_2", {
+          remoteJid: "group1@g.us",
+          type: "fixed",
+          size: 4,
+          parentPollId: "sess_title_1",
+          partNumber: 2,
+          totalParts: 2,
+          sessionTotalSize: 16,
+          name: "🎾 Friday 7pm (Part 2/2: Spots 13–16)",
+          when: "Friday 7pm",
+          status: "active",
+          options: ["Player 13", "Player 14", "Player 15", "Player 16"],
+          voteBuffer: new Map()
+        }]
+      ]);
+
+      const ctx = { activePolls, recurringPolls: new Map(), messageStore: new Map() };
+
+      const manualOut = pollStatusText("group1@g.us", { targetId: "p_manual" }, ctx);
+      assert.match(manualOut, /^Poll p_manual: User-Created Manual Match Poll\.\nTitle: Friday evening 6pm doubles\?/);
+      assert.doesNotMatch(manualOut.split("\n")[0], /Friday evening 6pm doubles\?/);
+
+      const manualCustomOut = pollStatusText("group1@g.us", { targetId: "p_manual_custom" }, ctx);
+      assert.match(manualCustomOut, /^Poll p_manual_custom: User-Created Manual Match Poll\.\nTitle: Manual Club Hit/);
+
+      const fixedOut = pollStatusText("group1@g.us", { targetId: "p_fixed_noncustom" }, ctx);
+      assert.match(fixedOut, /^Poll p_fixed_noncustom \(Tomorrow 7pm\): 4 spots \(Doubles\)\.\nTitle: 🎾 Tomorrow 7pm \(4 slots \/ 4\)\n/);
+
+      const optInOut = pollStatusText("group1@g.us", { targetId: "p_optin_noncustom" }, ctx);
+      assert.match(optInOut, /^Poll p_optin_noncustom \(Saturday 8am\): Opt-in \(Yes\/No, 4 spots max\)\.\nTitle: 🎾 Saturday 8am \(4 spots — Vote Yes\/No\)\n/);
+
+      const multiOut = pollStatusText("group1@g.us", { targetId: "p_multi_noncustom" }, ctx);
+      assert.match(multiOut, /^Poll p_multi_noncustom \(Sunday 8am\): Multi-Time Poll \(1 time slots\)\.\nTitle: 🎾 Sunday \(Vote for time\(s\)\)\n/);
+
+      const splitOut = pollStatusText("group1@g.us", { targetId: "p_split_1" }, ctx);
+      assert.match(splitOut, /^Poll Session sess_title_1 \(Friday 7pm\): 16 spots \(Doubles, split into 2 polls\)\.\nTitle: 🎾 Friday 7pm\n/);
+
+      // DM / all-chats output keeps Poll ID and Title on separate lines
+      const dmOut = pollStatusText(null, {}, ctx);
+      assert.match(dmOut, /Chat\/Group: group1@g\.us\nPoll p_manual: User-Created Manual Match Poll\.\nTitle: Friday evening 6pm doubles\?/);
     });
   });
 });

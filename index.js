@@ -1462,7 +1462,7 @@ async function startBot() {
 
           const hasExplicitDayInPollTitle = /\b(today|tonight|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\b/i.test(pollName);
           const hasTimeSpecified = Boolean(interpretation.timeWord) || pollCommands.hasTimeSpecifiedInTitle(pollName);
-          const effectiveDayWord = interpretation.dayWord || null;
+          const effectiveDayWord = interpretation.dayWord || pollCommands.getPollDayWord({ name: pollName, when: interpretation.when }) || null;
           const effectiveTimeWord = hasTimeSpecified ? (interpretation.timeWord || null) : null;
           const playAt = hasTimeSpecified ? resolvePlayDateTime(effectiveDayWord, effectiveTimeWord) : null;
           const sjNow = getSanJoseNow();
