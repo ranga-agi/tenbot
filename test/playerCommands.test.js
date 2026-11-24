@@ -10,6 +10,7 @@ const {
   handleScoreCommand,
   parseMatchResultExpression,
   handlePlayerCommand,
+  splitScoreCommandEntries,
   nameFor,
   canUserManagePlayerAlias
 } = require('../lib/commands/player');
@@ -113,6 +114,44 @@ describe('playerCommands', () => {
     it('should reject uneven sides with vs', () => {
       const uneven = handleScoreCommand('!score Mike & Sara vs John 6-4 6-2');
       assert.match(uneven, /Both sides need the same number of players/);
+    });
+
+    it('should reject an entire multi-score batch if any entry cannot be parsed', () => {
+      const res = handleScoreCommand('!score Mike vs John 6-4 6-2\nAlice won against Bob');
+      assert.match(res, /Couldn't parse entry #2/);
+      assert.match(res, /No scores were recorded/);
+    });
+
+    it('should reject an entire multi-score batch if any entry has uneven sides', () => {
+      const res = handleScoreCommand('!score Mike vs John 6-4; Alice & Sara vs Bob 6-2');
+      assert.match(res, /Error on entry #2/);
+      assert.match(res, /Both sides need the same number of players/);
+      assert.match(res, /No scores were recorded/);
+    });
+  });
+
+  describe('splitScoreCommandEntries', () => {
+    it('should split entries on newlines and semicolons and strip prefixes/headers', () => {
+      assert.deepEqual(
+        splitScoreCommandEntries('Mike vs John 6-4; Alice vs Bob 6-3 6-2'),
+        ['Mike vs John 6-4', 'Alice vs Bob 6-3 6-2']
+      );
+
+      assert.deepEqual(
+        splitScoreCommandEntries(
+          'Set 1:\n- Court 1: Mike & Sara vs John & Alex 6-4 4-6\n2. Match 2: Alice vs Bob 6-3 7-5\n• C3: Charlie def Dave 6-1'
+        ),
+        [
+          'Mike & Sara vs John & Alex 6-4 4-6',
+          'Alice vs Bob 6-3 7-5',
+          'Charlie def Dave 6-1'
+        ]
+      );
+
+      assert.deepEqual(
+        splitScoreCommandEntries('  1) Roger vs Rafa 6-4 6-4  \n  Round 2: \n  Novak vs Andy 7-5 6-3 '),
+        ['Roger vs Rafa 6-4 6-4', 'Novak vs Andy 7-5 6-3']
+      );
     });
   });
 

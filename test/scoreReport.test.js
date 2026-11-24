@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseScoreReport, DEFAULT_SET } = require('../lib/scoreReport');
+const { parseScoreReport, parseScoreReports, DEFAULT_SET } = require('../lib/scoreReport');
 
 describe('scoreReport', () => {
   const dummyOptions = {
@@ -93,5 +93,39 @@ describe('scoreReport', () => {
     assert.equal(parseScoreReport('we beat the traffic today', dummyOptions), null);
     assert.equal(parseScoreReport('who won the US Open?', dummyOptions), null);
     assert.equal(parseScoreReport('hello everyone', dummyOptions), null);
+  });
+
+  describe('parseScoreReports (multi-match)', () => {
+    it('should parse multiple matches across lines with Court prefixes', () => {
+      const reports = parseScoreReports(
+        'Court 1: Mike & Sara vs John & Alex 6-4 6-2\nCourt 2: Alice vs Bob 6-3 4-6',
+        dummyOptions
+      );
+      assert.equal(reports.length, 2);
+      assert.deepEqual(reports[0].winners, ['Mike', 'Sara']);
+      assert.deepEqual(reports[0].losers, ['John', 'Alex']);
+      assert.deepEqual(reports[0].sets, [[6, 4], [6, 2]]);
+      assert.deepEqual(reports[1].winners, ['Alice']);
+      assert.deepEqual(reports[1].losers, ['Bob']);
+      assert.deepEqual(reports[1].sets, [[6, 3], [4, 6]]);
+    });
+
+    it('should parse semicolon-separated matches and mixed chat messages', () => {
+      const semiReports = parseScoreReports(
+        'Mike vs John 6-4; Alice beat Bob 6-2 6-3',
+        dummyOptions
+      );
+      assert.equal(semiReports.length, 2);
+      assert.deepEqual(semiReports[0].sets, [[6, 4]]);
+      assert.deepEqual(semiReports[1].sets, [[6, 2], [6, 3]]);
+
+      const mixedReports = parseScoreReports(
+        'Great games today! Mike beat John 6-4. Alice vs Bob 6-3 7-5.',
+        dummyOptions
+      );
+      assert.equal(mixedReports.length, 2);
+      assert.deepEqual(mixedReports[0].winners, ['Mike']);
+      assert.deepEqual(mixedReports[1].winners, ['Alice']);
+    });
   });
 });

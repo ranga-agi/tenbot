@@ -31,9 +31,11 @@ const {
   handleScoreCommand,
   handleListScores,
   handleDeleteScore,
-  handleEditScore
+  handleEditScore,
+  handleFreeformScore
 } = require('../lib/commands/player');
 const ratings = require('../lib/ratings');
+const { DATA_DIR } = require('../lib/paths');
 
 describe('stats', () => {
   let originalStats = null;
@@ -697,6 +699,118 @@ describe('stats', () => {
       assert.equal(venus.points, 8);
       assert.equal(venus.gamesWon, 8);
       assert.equal(venus.gamesLost, 12);
+    });
+
+    describe('multi-score batch reporting', () => {
+      const RATINGS_FILE = path.join(DATA_DIR, 'ratings.json');
+      let originalRatings = null;
+
+      before(() => {
+        if (fs.existsSync(RATINGS_FILE)) {
+          originalRatings = fs.readFileSync(RATINGS_FILE, 'utf-8');
+        }
+      });
+
+      after(() => {
+        if (originalRatings !== null) {
+          fs.writeFileSync(RATINGS_FILE, originalRatings);
+        }
+      });
+
+      it('should record multi-line batch scores with individual IDs and support individual edit/delete', async () => {
+        fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+        ratings.setRating('BatchP1', 3.50);
+        ratings.setRating('BatchP2', 3.50);
+        ratings.setRating('BatchP3', 3.50);
+        ratings.setRating('BatchP4', 3.50);
+
+        const res = handleScoreCommand(
+          '!score\nCourt 1: BatchP1 vs BatchP2 6-4 6-2\nCourt 2: BatchP3 vs BatchP4 6-3 4-6'
+        );
+
+        assert.match(res, /Recorded 2 match scores:/);
+        assert.match(res, /1\. BatchP1 vs BatchP2 \(6-4 6-2\) `(m_[^`]+)`/);
+        assert.match(res, /2\. BatchP3 vs BatchP4 \(6-3 4-6\) `(m_[^`]+)`/);
+        assert.match(res, /Rating updates:/);
+
+        const matches = getRecentMatches(10);
+        assert.equal(matches.length, 2);
+        assert.notEqual(matches[0].id, matches[1].id);
+
+        const idMatches = [...res.matchAll(/`(m_[^`]+)`/g)].map((m) => m[1]);
+        assert.equal(idMatches.length, 2);
+        const [id1, id2] = idMatches;
+
+        const mockSock = {
+          groupMetadata: async () => ({
+            participants: [{ id: 'admin@s.whatsapp.net', admin: 'admin' }]
+          })
+        };
+
+        // Edit only match 1 by its individual ID
+        const editRes = await handleEditScore(mockSock, 'test@g.us', 'admin@s.whatsapp.net', 'Admin', `${id1} 6-0 6-0`);
+        assert.match(editRes, /Updated match score/);
+        assert.equal(findMatchByIdOrIndex(id1).score, '6-0 6-0');
+        assert.equal(findMatchByIdOrIndex(id2).score, '6-3 4-6');
+
+        // Delete only match 1 by its individual ID; match 2 remains intact
+        const delRes = await handleDeleteScore(mockSock, 'test@g.us', 'admin@s.whatsapp.net', 'Admin', id1);
+        assert.match(delRes, /Deleted match score/);
+        assert.equal(findMatchByIdOrIndex(id1), null);
+        assert.ok(findMatchByIdOrIndex(id2));
+        assert.equal(ratings.getRating('BatchP1'), 3.50);
+        assert.equal(ratings.getRating('BatchP2'), 3.50);
+      });
+
+      it('should consolidate net rating updates when a player appears in multiple batch matches', () => {
+        fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+        ratings.setRating('NetAlice', 3.50);
+        ratings.setRating('NetBob', 3.50);
+        ratings.setRating('NetCharlie', 3.50);
+
+        const res = handleScoreCommand('!score NetAlice vs NetBob 6-2; NetAlice vs NetCharlie 6-1');
+        assert.match(res, /Recorded 2 match scores:/);
+
+        // NetAlice should appear once in Rating updates with final rating matching stored rating
+        const ratingSection = res.split('Rating updates:')[1] || '';
+        const aliceLines = ratingSection.split('\n').filter((l) => l.includes('NetAlice:'));
+        assert.equal(aliceLines.length, 1);
+        assert.ok(aliceLines[0].includes('3.50 → '));
+        assert.ok(aliceLines[0].includes(ratings.formatRating(ratings.getRating('NetAlice'))));
+      });
+
+      it('should not record any match in stats when a multi-score batch has an error on entry #2', () => {
+        fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+        const res = handleScoreCommand('!score BatchOk1 vs BatchOk2 6-4; BadLineWithoutScore');
+        assert.match(res, /Couldn't parse entry #2/);
+        assert.match(res, /No scores were recorded/);
+        assert.equal(getRecentMatches(10).length, 0);
+      });
+
+      it('should record multiple matches from free-form @tenbot chat messages and deduplicate repeats', () => {
+        fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+        const chatId = '120363000000000099@g.us';
+        const activePolls = new Map([
+          ['poll_1', { remoteJid: chatId, lastPlayers: ['FreeP1', 'FreeP2', 'FreeP3', 'FreeP4'] }]
+        ]);
+        const candidates = [
+          '@tenbot\nFreeP1 vs FreeP2 6-4\nFreeP3 vs FreeP4 6-3',
+          'FreeP1 vs FreeP2 6-4\nFreeP3 vs FreeP4 6-3'
+        ];
+
+        const res = handleFreeformScore(candidates, chatId, 'FreeP1', activePolls);
+        assert.ok(res);
+        assert.match(res, /Recorded 2 match scores:/);
+        assert.match(res, /FreeP1 vs FreeP2 \(6-4\)/);
+        assert.match(res, /FreeP3 vs FreeP4 \(6-3\)/);
+
+        // Immediate repeat is ignored
+        const repeatRes = handleFreeformScore(candidates, chatId, 'FreeP1', activePolls);
+        assert.equal(repeatRes, null);
+      });
     });
   });
 });
