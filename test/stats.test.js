@@ -900,9 +900,11 @@ describe('stats', () => {
         assert.equal(jan.currentMonth, 0);
       });
 
-      it('should publish old monthly leaderboard to notifications list on month reset without duplicates and respecting quiet hours', async () => {
+      it('should publish old monthly leaderboard to the group on month reset without duplicates and respecting quiet hours', async () => {
         const GROUP_ID = '120363403838804497@g.us';
+        const NO_NOTIF_GROUP = '120363403838804999@g.us';
         const EMPTY_GROUP = '120363000000000777@g.us';
+        const OTHER_MONTH_ONLY_GROUP = '120363000000000888@g.us';
         const NOTIF_1 = '90611059302558@lid';
         const NOTIF_2 = '165777365799110@lid';
 
@@ -923,6 +925,42 @@ describe('stats', () => {
               format: 'vs',
               chatId: GROUP_ID,
               date: '2026-11-28T18:00:00Z'
+            },
+            {
+              id: 'm_nov_2',
+              winner: 'OtherWinner',
+              loser: 'OtherLoser',
+              winners: ['OtherWinner'],
+              losers: ['OtherLoser'],
+              score: '6-4 6-4',
+              sets: [[6, 4], [6, 4]],
+              format: 'vs',
+              chatId: NO_NOTIF_GROUP,
+              date: '2026-11-29T18:00:00Z'
+            },
+            {
+              id: 'm_oct_only',
+              winner: 'OctWinner',
+              loser: 'OctLoser',
+              winners: ['OctWinner'],
+              losers: ['OctLoser'],
+              score: '6-1 6-1',
+              sets: [[6, 1], [6, 1]],
+              format: 'vs',
+              chatId: OTHER_MONTH_ONLY_GROUP,
+              date: '2026-10-25T18:00:00Z'
+            },
+            {
+              id: 'm_dec_only',
+              winner: 'DecWinner',
+              loser: 'DecLoser',
+              winners: ['DecWinner'],
+              losers: ['DecLoser'],
+              score: '6-2 6-2',
+              sets: [[6, 2], [6, 2]],
+              format: 'vs',
+              chatId: OTHER_MONTH_ONLY_GROUP,
+              date: '2026-12-01T15:00:00Z'
             }
           ]
         }));
@@ -936,18 +974,24 @@ describe('stats', () => {
         };
 
         const origLoad = groupsConfig.loadRawConfig;
-        const origGetNotifs = groupsConfig.getNotifications;
         const origGetCfg = groupsConfig.getGroupConfig;
         const origQuiet = groupsConfig.isInQuietHours;
 
         groupsConfig.loadRawConfig = () => ({
           groups: {
             [GROUP_ID]: { name: 'Bot-testing', notifications: [NOTIF_1, NOTIF_2] },
-            [EMPTY_GROUP]: { name: 'Empty-Group', notifications: [NOTIF_1] }
+            [NO_NOTIF_GROUP]: { name: 'No-Notifs-Group' },
+            [EMPTY_GROUP]: { name: 'Empty-Group', notifications: [NOTIF_1] },
+            [OTHER_MONTH_ONLY_GROUP]: { name: 'Other-Month-Only-Group' }
           }
         });
-        groupsConfig.getNotifications = (gid) => (gid === GROUP_ID || gid === EMPTY_GROUP ? [NOTIF_1, NOTIF_2] : []);
-        groupsConfig.getGroupConfig = (gid) => ({ name: gid === GROUP_ID ? 'Bot-testing' : 'Empty-Group' });
+        groupsConfig.getGroupConfig = (gid) => ({
+          name: gid === GROUP_ID
+            ? 'Bot-testing'
+            : (gid === NO_NOTIF_GROUP
+              ? 'No-Notifs-Group'
+              : (gid === OTHER_MONTH_ONLY_GROUP ? 'Other-Month-Only-Group' : 'Empty-Group'))
+        });
         groupsConfig.isInQuietHours = (nowMs) => new Date(nowMs).getUTCHours() === 8; // 00:00 PT = 08:00 UTC (quiet hours)
 
         try {
@@ -956,19 +1000,19 @@ describe('stats', () => {
           assert.equal(quietRes.length, 0);
           assert.equal(sent.length, 0);
 
-          // 2. Outside quiet hours (Dec 1 08:00 PT = 16:00 UTC): sends November leaderboard to both recipients, skips EMPTY_GROUP
+          // 2. Outside quiet hours (Dec 1 08:00 PT = 16:00 UTC): posts November leaderboard directly to each group with Nov scores, skips EMPTY_GROUP and OTHER_MONTH_ONLY_GROUP
           const res1 = await publishMonthlyLeaderboards(mockSock, { now: new Date('2026-12-01T16:00:00Z') });
-          assert.equal(res1.length, 1);
-          assert.equal(res1[0].chatId, GROUP_ID);
-          assert.equal(res1[0].monthKey, '2026-11');
-          assert.equal(res1[0].sentCount, 2);
+          assert.equal(res1.length, 2);
+          assert.deepEqual(res1.map((r) => r.chatId), [GROUP_ID, NO_NOTIF_GROUP]);
+          assert.ok(res1.every((r) => r.monthKey === '2026-11'));
           assert.equal(sent.length, 2);
-          assert.deepEqual(sent.map((m) => m.jid), [NOTIF_1, NOTIF_2]);
-          assert.match(sent[0].text, /Monthly Leaderboard Final Standings — Bot-testing/);
+          assert.deepEqual(sent.map((m) => m.jid), [GROUP_ID, NO_NOTIF_GROUP]);
+          assert.match(sent[0].text, /Final Monthly Leaderboard — November 2026/);
           assert.match(sent[0].text, /November 2026/);
           assert.match(sent[0].text, /December 2026/);
           assert.match(sent[0].text, /NovWinner/);
           assert.match(sent[0].text, /NovLoser/);
+          assert.match(sent[1].text, /OtherWinner/);
 
           // 3. Running again in the same new month must NOT resend
           const res2 = await publishMonthlyLeaderboards(mockSock, { now: new Date('2026-12-02T16:00:00Z') });
@@ -976,7 +1020,6 @@ describe('stats', () => {
           assert.equal(sent.length, 2);
         } finally {
           groupsConfig.loadRawConfig = origLoad;
-          groupsConfig.getNotifications = origGetNotifs;
           groupsConfig.getGroupConfig = origGetCfg;
           groupsConfig.isInQuietHours = origQuiet;
         }

@@ -127,9 +127,11 @@ describe('help', () => {
     const text = helpText('score', false);
     assert.match(text, /Match Score Reporting \(!score\)/);
     assert.match(text, /Options:/);
-    assert.match(text, /`<winner>` — Name\(s\) of the winning player/);
-    assert.match(text, /`<loser>` — Name\(s\) of the losing player/);
+    assert.match(text, /`<side1>` — Name\(s\) of the first player/);
+    assert.match(text, /`<side2>` — Name\(s\) of the second player/);
+    assert.match(text, /`vs` — Records per-set W\/L and points/);
     assert.match(text, /`<score>` — Match scores by set/);
+    assert.equal(/\bdef\b/i.test(text), false);
   });
 
   it('should provide options descriptions for all registered commands in COMMAND_HELP', () => {
