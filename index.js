@@ -364,7 +364,7 @@ function buildContextBlurb(chatId) {
     : 'no one has marked themselves free right now';
 
   const leaderboardText = board.length
-    ? board.slice(0, 5).map((p) => `${p.name}: ${p.points} pts (${p.wins}W-${p.losses}L)`).join(', ')
+    ? board.slice(0, 5).map((p) => `${p.name}: ${typeof p.score === 'number' ? p.score.toFixed(2) : p.points} avg (${p.points} pts, ${p.wins}W-${p.losses}L)`).join(', ')
     : 'no matches recorded yet';
 
   const recentText = recent.length

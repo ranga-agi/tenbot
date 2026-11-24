@@ -10,6 +10,7 @@ const {
   recordMatch,
   getLeaderboard,
   evaluateSetWinner,
+  scoreSetPoints,
   migrateDefMatchesToVs,
   getRecentMatches,
   getScores,
@@ -180,28 +181,31 @@ describe('stats', () => {
       assert.equal(charlie.wins, 1);
       assert.equal(charlie.losses, 2);
 
-      // Points breakdown:
-      // Alice: 16 pts (12 games won, 7 games lost)
-      assert.equal(alice.points, 16);
+      // Points breakdown (Win: 10+margin, Loss: 6-margin; smoothed (pts+16)/(sets+4)):
+      // Alice: 6-4 win (12) + 6-3 win (13) = 25 pts, 2 sets -> (25+16)/6 = 6.83
+      assert.equal(alice.points, 25);
+      assert.equal(alice.score, 6.83);
       assert.equal(alice.gamesWon, 12);
       assert.equal(alice.gamesLost, 7);
 
-      // Bob: 11 pts (9 games won, 10 games lost)
-      assert.equal(bob.points, 11);
+      // Bob: 6-4 win (12) + 3-6 loss (3) = 15 pts, 2 sets -> (15+16)/6 = 5.17
+      assert.equal(bob.points, 15);
+      assert.equal(bob.score, 5.17);
 
-      // Charlie: 17 pts (15 games won, 16 games lost, 1 set won = 17 pts)
-      assert.equal(charlie.points, 17);
+      // Charlie: 4-6 loss (4) + 6-3 win (13) + 5-7 loss (4) = 21 pts, 3 sets -> (21+16)/7 = 5.29
+      assert.equal(charlie.points, 21);
+      assert.equal(charlie.score, 5.29);
 
-      // Dave: 16 pts (14 games won, 17 games lost, 1 set won = 16 pts)
-      assert.equal(dave.points, 16);
+      // Dave: 4-6 loss (4) + 3-6 loss (3) + 7-5 win (12) = 19 pts, 3 sets -> (19+16)/7 = 5.00
+      assert.equal(dave.points, 19);
+      assert.equal(dave.score, 5.00);
       assert.equal(dave.gamesLost, 17);
 
-      // Ranking: Charlie (17 pts) > Alice (16 pts, 7 lost) > Dave (16 pts, 17 lost) > Bob (11 pts)
-      // Tiebreaker: Alice and Dave both have 16 points; Alice lost fewer games (7 vs 17), so Alice ranks above Dave!
-      assert.equal(leaderboard[0].name, 'Charlie');
-      assert.equal(leaderboard[1].name, 'Alice');
-      assert.equal(leaderboard[2].name, 'Dave');
-      assert.equal(leaderboard[3].name, 'Bob');
+      // Ranking by conservative smoothed score: Alice (6.83) > Charlie (5.29) > Bob (5.17) > Dave (5.00)
+      assert.equal(leaderboard[0].name, 'Alice');
+      assert.equal(leaderboard[1].name, 'Charlie');
+      assert.equal(leaderboard[2].name, 'Bob');
+      assert.equal(leaderboard[3].name, 'Dave');
     });
 
     it('should format individual leaderboard cleanly with points and games', () => {
@@ -211,11 +215,11 @@ describe('stats', () => {
 
       const formatted = formatLeaderboard();
       assert.match(formatted, /🏆 \*Leaderboard/);
-      assert.match(formatted, /1\. Alice — 8 pts \(6-4 games, 1-0 sets, 1W 0L\)/);
-      assert.match(formatted, /2\. Bob — 8 pts \(6-4 games, 1-0 sets, 1W 0L\)/);
-      assert.match(formatted, /3\. Charlie — 4 pts \(4-6 games, 0-1 sets, 0W 1L\)/);
-      assert.match(formatted, /4\. Dave — 4 pts \(4-6 games, 0-1 sets, 0W 1L\)/);
-      assert.match(formatted, /_Scoring: 1 pt\/game \+ 2 pts\/set win • Tiebreaker: fewer games lost_/);
+      assert.match(formatted, /1\. Alice — 5\.60 avg \(12 pts, 6-4 games, 1W 0L sets\)/);
+      assert.match(formatted, /2\. Bob — 5\.60 avg \(12 pts, 6-4 games, 1W 0L sets\)/);
+      assert.match(formatted, /3\. Charlie — 4\.00 avg \(4 pts, 4-6 games, 0W 1L sets\)/);
+      assert.match(formatted, /4\. Dave — 4\.00 avg \(4 pts, 4-6 games, 0W 1L sets\)/);
+      assert.match(formatted, /_Scoring: smoothed pts\/set \(Win: 10\+margin, Loss: 6-margin; \+16 pts \/ \+4 sets baseline\) • Tiebreaker: total pts, game diff_/);
     });
 
     it('should integrate individual stats through handleScoreCommand', () => {
@@ -269,8 +273,9 @@ describe('stats', () => {
       const alice = leaderboard.find((p) => p.name === 'Alice');
       const charlie = leaderboard.find((p) => p.name === 'Charlie');
 
-      // Alice & Bob: 9 games + 1 set (2 pts) = 11 pts, 1-1 sets, 1W 1L
-      assert.equal(alice.points, 11);
+      // Alice & Bob: 6-4 (12) + 3-6 (3) = 15 pts, (15+16)/6 = 5.17
+      assert.equal(alice.points, 15);
+      assert.equal(alice.score, 5.17);
       assert.equal(alice.gamesWon, 9);
       assert.equal(alice.gamesLost, 10);
       assert.equal(alice.setsWon, 1);
@@ -278,13 +283,14 @@ describe('stats', () => {
       assert.equal(alice.wins, 1);
       assert.equal(alice.losses, 1);
 
-      // Charlie & Dave: 10 games + 1 set (2 pts) = 12 pts, 1-1 sets, 1W 1L
-      assert.equal(charlie.points, 12);
+      // Charlie & Dave: 4-6 (4) + 6-3 (13) = 17 pts, (17+16)/6 = 5.50
+      assert.equal(charlie.points, 17);
+      assert.equal(charlie.score, 5.50);
       assert.equal(charlie.wins, 1);
       assert.equal(charlie.losses, 1);
 
       const formatted = formatLeaderboard();
-      assert.match(formatted, /1\. Charlie — 12 pts \(10-9 games, 1-1 sets, 1W 1L\)/);
+      assert.match(formatted, /1\. Charlie — 5\.50 avg \(17 pts, 10-9 games, 1W 1L sets\)/);
     });
 
     it('should treat incomplete sets as a win only when leader won at least 4 games', () => {
@@ -300,16 +306,18 @@ describe('stats', () => {
       const alice = leaderboard.find((p) => p.name === 'Alice');
       const bob = leaderboard.find((p) => p.name === 'Bob');
 
-      // Only 4-2 counts as a set win (3-2 has < 4 games, 4-4 is tied)
-      // Alice: 4+3+4 = 11 games + 1 set (2 pts) = 13 pts, 1W 0L
-      assert.equal(alice.points, 13);
+      // Only 4-2 counts as a decided set (12 vs 4); 3-2 and 4-4 don't alter set average
+      // Alice: 12 pts, 1W 0L -> (12+16)/5 = 5.60
+      assert.equal(alice.points, 12);
+      assert.equal(alice.score, 5.60);
       assert.equal(alice.setsWon, 1);
       assert.equal(alice.setsLost, 0);
       assert.equal(alice.wins, 1);
       assert.equal(alice.losses, 0);
 
-      // Bob: 2+2+4 = 8 games + 0 sets = 8 pts, 0W 1L
-      assert.equal(bob.points, 8);
+      // Bob: 4 pts, 0W 1L -> (4+16)/5 = 4.00
+      assert.equal(bob.points, 4);
+      assert.equal(bob.score, 4.00);
       assert.equal(bob.setsWon, 0);
       assert.equal(bob.setsLost, 1);
       assert.equal(bob.wins, 0);
@@ -636,28 +644,66 @@ describe('stats', () => {
       assert.equal(scoresRaw.some(m => m.winner === "Eve" && m.loser === "Frank"), true);
     });
 
-    it("should calculate points and apply tiebreaker by fewer games lost", () => {
+    it("should calculate symmetric set points and apply tiebreaker by fewer games lost when tied", () => {
+      assert.deepEqual(scoreSetPoints(6, 0), { a: 16, b: 0, decided: true });
+      assert.deepEqual(scoreSetPoints(6, 4), { a: 12, b: 4, decided: true });
+      assert.deepEqual(scoreSetPoints(7, 5), { a: 12, b: 4, decided: true });
+      assert.deepEqual(scoreSetPoints(7, 6), { a: 11, b: 5, decided: true });
+      assert.deepEqual(scoreSetPoints(10, 2), { a: 16, b: 0, decided: true });
+      assert.deepEqual(scoreSetPoints(3, 2), { a: 0, b: 0, decided: false });
+      assert.deepEqual(scoreSetPoints(4, 4), { a: 0, b: 0, decided: false });
+
       fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
 
-      // Player X wins 6-0 (1 set won, 6 games won = 6 + 2 = 8 pts, 0 games lost)
-      recordMatch("PlayerX", "Opponent1", "6-0");
-
-      // Player Y wins 6-4 (1 set won, 6 games won = 6 + 2 = 8 pts, 4 games lost)
-      recordMatch("PlayerY", "Opponent2", "6-4");
+      // Both PlayerX and PlayerY earn 16 pts across 2 sets (game diff = 0), PlayerX lost fewer games (10 vs 12)
+      recordMatch("PlayerX", "Opponent1", "6-4 4-6");
+      recordMatch("PlayerY", "Opponent2", "7-5 5-7");
 
       const board = getLeaderboard();
       const pX = board.find(p => p.name === "PlayerX");
       const pY = board.find(p => p.name === "PlayerY");
 
-      assert.equal(pX.points, 8);
-      assert.equal(pX.gamesLost, 0);
-      assert.equal(pY.points, 8);
-      assert.equal(pY.gamesLost, 4);
+      assert.equal(pX.points, 16);
+      assert.equal(pX.score, 5.33);
+      assert.equal(pX.gamesLost, 10);
+      assert.equal(pY.points, 16);
+      assert.equal(pY.score, 5.33);
+      assert.equal(pY.gamesLost, 12);
 
-      // PlayerX is ranked higher than PlayerY because PlayerX lost fewer games (0 vs 4)
       const idxX = board.findIndex(p => p.name === "PlayerX");
       const idxY = board.findIndex(p => p.name === "PlayerY");
-      assert.ok(idxX < idxY, "PlayerX (0 games lost) must rank higher than PlayerY (4 games lost) when tied at 8 points");
+      assert.ok(idxX < idxY, "PlayerX (10 games lost) must rank higher than PlayerY (12 games lost) when tied");
+    });
+
+    it("should rank fairly across uneven play volume using conservative smoothed average", () => {
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+      // Bob: 4-0 (54 pts, 4 sets -> (54+16)/8 = 8.75)
+      recordMatch("Bob", "OppA", "6-2 6-3 6-4 6-1");
+      // Alice: 1-0 (16 pts, 1 set -> (16+16)/5 = 6.40)
+      recordMatch("Alice", "OppB", "6-0");
+      // Charlie: 6-4 across 10 sets (90 pts, 10 sets -> (90+16)/14 = 7.57)
+      recordMatch("Charlie", "OppC", "6-4 6-4 6-4 6-3 6-3 6-2 4-6 4-6 3-6 3-6");
+      // Dave: 3-9 across 12 sets (66 pts, 12 sets -> (66+16)/16 = 5.13)
+      recordMatch("Dave", "OppD", "6-4 6-4 6-3 4-6 4-6 4-6 4-6 4-6 3-6 2-6 2-6 2-6");
+      // Eve: 0-1 (4 pts, 1 set -> (4+16)/5 = 4.00)
+      recordMatch("Eve", "OppE", "4-6");
+
+      const board = getLeaderboard();
+      const bob = board.find(p => p.name === "Bob");
+      const charlie = board.find(p => p.name === "Charlie");
+      const alice = board.find(p => p.name === "Alice");
+      const dave = board.find(p => p.name === "Dave");
+      const eve = board.find(p => p.name === "Eve");
+
+      assert.equal(bob.score, 8.75);
+      assert.equal(charlie.score, 7.57);
+      assert.equal(alice.score, 6.40);
+      assert.equal(dave.score, 5.13);
+      assert.equal(eve.score, 4.00);
+
+      const order = [bob, charlie, alice, dave, eve].map(p => board.indexOf(p));
+      assert.ok(order[0] < order[1] && order[1] < order[2] && order[2] < order[3] && order[3] < order[4]);
     });
 
     it("should isolate scores by group chatId", () => {
@@ -691,12 +737,14 @@ describe('stats', () => {
       const serena = board.find(p => p.name === "Serena");
       const venus = board.find(p => p.name === "Venus");
 
-      // Serena won 12 games + 2 sets (4 pts) = 16 pts
-      assert.equal(serena.points, 16);
+      // Serena won 6-4 6-4 -> 12 + 12 = 24 pts, (24+16)/6 = 6.67
+      assert.equal(serena.points, 24);
+      assert.equal(serena.score, 6.67);
       assert.equal(serena.gamesWon, 12);
       assert.equal(serena.gamesLost, 8);
-      // Venus won 8 games + 0 sets = 8 pts
+      // Venus lost 4-6 4-6 -> 4 + 4 = 8 pts, (8+16)/6 = 4.00
       assert.equal(venus.points, 8);
+      assert.equal(venus.score, 4.00);
       assert.equal(venus.gamesWon, 8);
       assert.equal(venus.gamesLost, 12);
     });
