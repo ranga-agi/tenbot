@@ -134,7 +134,7 @@ const SYSTEM_PROMPT =
   'ALWAYS call the generate_matchups tool (or rematch tool). If the user asks to keep specific players on the same team or partner together (e.g. "keeping PlayerA and PlayerB in same team", "partner P1 with P2", "with X and Y together"), ALWAYS pass those players in fixedPairs as a 2D array of string pairs (e.g. fixedPairs: [["PlayerA", "PlayerB"]]) to generate_matchups or rematch. NEVER tell the user that a poll has ended, is closed, or is not active when they ask for matchups. ' +
   'If there are multiple polls or a specific poll is requested (e.g. "for 10am", "Tennis 8am"), pass pollId or pollName to generate_matchups. ' +
   'When a user shares, posts, updates, or asks to parse or record match lineups, court assignments, teams, or rotations (e.g. "Court 1: Alice & Bob vs Charlie & David", "Set 1: Court 2 Mike / Sara vs John / Alex", "@P1 @P2 @P3 @P4 - Court 6 7pm"), ALWAYS call the parse_lineup tool. If the number of players listed in a lineup is 1 less than a valid player configuration (e.g. 1 player for singles, 3 players for 1 doubles court, 7 players for 2 courts, 11 players for 3 courts), include the message sender or poll creator to complete the underfilled court. ' +
-  'Results can be reported to you in plain words ("Mike & Sara ' +
+  'Results can be reported to you in plain words ("Mike & Sara vs John & Alex 6-4 4-6", "Mike & Sara ' +
   'beat John & Alex 6-4", or "we won" right after a draw) and are logged automatically before ' +
   "you see the message, so don't claim you can't record scores. " +
   'Initial ratings for new players are looked up from TennisRecord.com (defaulting to 3.0 if not found). ' +
@@ -364,11 +364,11 @@ function buildContextBlurb(chatId) {
     : 'no one has marked themselves free right now';
 
   const leaderboardText = board.length
-    ? board.slice(0, 5).map((p) => `${p.name}: ${p.wins}W-${p.losses}L`).join(', ')
+    ? board.slice(0, 5).map((p) => `${p.name}: ${p.points} pts (${p.wins}W-${p.losses}L)`).join(', ')
     : 'no matches recorded yet';
 
   const recentText = recent.length
-    ? recent.map((m) => `${m.winner} def ${m.loser} (${m.score})`).join('; ')
+    ? recent.map((m) => `${m.winner} vs ${m.loser} (${m.score})`).join('; ')
     : 'none';
 
   const mePn = jidNormalizedUser(botSock?.user?.id || botSock?.authState?.creds?.me?.id || '');
@@ -1115,6 +1115,7 @@ async function handleMessage(sock, msg, groupName) {
 
 // Background sweeps (only active when running directly as main application)
 if (require.main === module) {
+  stats.migrateDefMatchesToVs();
   pollCommands.cleanupExpiredPolls(getPollContext());
   setInterval(() => {
     pollCommands.cleanupExpiredPolls(getPollContext());

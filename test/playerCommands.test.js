@@ -8,6 +8,7 @@ const {
   parseFullNameCommand,
   parseAliasCommand,
   handleScoreCommand,
+  parseMatchResultExpression,
   handlePlayerCommand,
   nameFor,
   canUserManagePlayerAlias
@@ -107,6 +108,38 @@ describe('playerCommands', () => {
     it('should reject invalid syntax', () => {
       const res = handleScoreCommand('!score Mike won against John');
       assert.match(res, /Couldn't parse that/);
+    });
+
+    it('should reject uneven sides with vs', () => {
+      const uneven = handleScoreCommand('!score Mike & Sara vs John 6-4 6-2');
+      assert.match(uneven, /Both sides need the same number of players/);
+    });
+  });
+
+  describe('parseMatchResultExpression', () => {
+    it('should parse vs, vs., versus, and v. preserving order and format=vs', () => {
+      const resDef = parseMatchResultExpression('Mike def John 6-4 6-2');
+      assert.deepEqual(resDef, { winners: ['Mike'], losers: ['John'], sets: [[6, 4], [6, 2]], format: 'vs' });
+
+      const resA = parseMatchResultExpression('Mike vs John 6-4 6-2');
+      assert.deepEqual(resA, { winners: ['Mike'], losers: ['John'], sets: [[6, 4], [6, 2]], format: 'vs' });
+
+      const resSplit = parseMatchResultExpression('Mike vs John 6-4 4-6');
+      assert.deepEqual(resSplit, { winners: ['Mike'], losers: ['John'], sets: [[6, 4], [4, 6]], format: 'vs' });
+
+      const resDoubles = parseMatchResultExpression('Mike & Sara vs. John & Alex 4-6 6-3 10-8');
+      assert.deepEqual(resDoubles, {
+        winners: ['Mike', 'Sara'],
+        losers: ['John', 'Alex'],
+        sets: [[4, 6], [6, 3], [10, 8]],
+        format: 'vs'
+      });
+
+      const resReversedSplit = parseMatchResultExpression('Mike versus John 6-4 3-6 7-6(4)');
+      assert.deepEqual(resReversedSplit, { winners: ['Mike'], losers: ['John'], sets: [[6, 4], [3, 6], [7, 6]], format: 'vs' });
+
+      const resVDot = parseMatchResultExpression('Alice v. Bob 3-6 6-4 6-7(5)');
+      assert.deepEqual(resVDot, { winners: ['Alice'], losers: ['Bob'], sets: [[3, 6], [6, 4], [6, 7]], format: 'vs' });
     });
   });
 

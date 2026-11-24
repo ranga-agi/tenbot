@@ -78,6 +78,16 @@ describe('ratings', () => {
       assert.ok(aliceChange.to >= aliceChange.from);
       assert.ok(bobChange.to <= bobChange.from);
     });
+
+    it('should adjust ratings for incomplete sets >= 4 games but skip sets under 4 games', () => {
+      const resUnder4 = applyResult(['SetTestA'], ['SetTestB'], [[3, 2]]);
+      assert.equal(resUnder4.sets.length, 0);
+      assert.equal(resUnder4.changes[0].delta, 0);
+
+      const resAt4 = applyResult(['SetTestA'], ['SetTestB'], [[4, 2]]);
+      assert.equal(resAt4.sets.length, 1);
+      assert.ok(resAt4.changes[0].delta > 0);
+    });
   });
 
   describe("tennisRecord location classification", () => {

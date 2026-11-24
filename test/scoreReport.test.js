@@ -22,6 +22,7 @@ describe('scoreReport', () => {
   it('should parse "A & B beat C & D <score>"', () => {
     const report = parseScoreReport('Mike & Sara beat John & Alex 6-4 6-2', dummyOptions);
     assert.ok(report);
+    assert.equal(report.format, 'vs');
     assert.deepEqual(report.winners, ['Mike', 'Sara']);
     assert.deepEqual(report.losers, ['John', 'Alex']);
     assert.deepEqual(report.sets, [[6, 4], [6, 2]]);
@@ -31,9 +32,37 @@ describe('scoreReport', () => {
   it('should parse "A def B <score>" in singles', () => {
     const report = parseScoreReport('Alice def Bob 6-3 6-4', dummyOptions);
     assert.ok(report);
+    assert.equal(report.format, 'vs');
     assert.deepEqual(report.winners, ['Alice']);
     assert.deepEqual(report.losers, ['Bob']);
     assert.deepEqual(report.sets, [[6, 3], [6, 4]]);
+  });
+
+  it('should parse "A vs B <score>" directly as vs including 2-set splits', () => {
+    const reportA = parseScoreReport('Alice vs Bob 6-3 6-4', dummyOptions);
+    assert.ok(reportA);
+    assert.equal(reportA.format, 'vs');
+    assert.deepEqual(reportA.winners, ['Alice']);
+    assert.deepEqual(reportA.losers, ['Bob']);
+    assert.deepEqual(reportA.sets, [[6, 3], [6, 4]]);
+
+    const reportSplit = parseScoreReport('Alice vs. Bob 6-4 4-6', dummyOptions);
+    assert.ok(reportSplit);
+    assert.equal(reportSplit.format, 'vs');
+    assert.deepEqual(reportSplit.winners, ['Alice']);
+    assert.deepEqual(reportSplit.losers, ['Bob']);
+    assert.deepEqual(reportSplit.sets, [[6, 4], [4, 6]]);
+
+    const doublesReport = parseScoreReport('Mike & Sara versus John & Alex 3-6 6-4 10-8', dummyOptions);
+    assert.ok(doublesReport);
+    assert.equal(doublesReport.format, 'vs');
+    assert.deepEqual(doublesReport.winners, ['Mike', 'Sara']);
+    assert.deepEqual(doublesReport.losers, ['John', 'Alex']);
+    assert.deepEqual(doublesReport.sets, [[3, 6], [6, 4], [10, 8]]);
+  });
+
+  it('should return null for "A vs B" when no score is given', () => {
+    assert.equal(parseScoreReport('Alice vs Bob', dummyOptions), null);
   });
 
   it('should parse score with tiebreak notation', () => {

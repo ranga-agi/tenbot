@@ -9,6 +9,8 @@ const {
   getAvailability,
   recordMatch,
   getLeaderboard,
+  evaluateSetWinner,
+  migrateDefMatchesToVs,
   getRecentMatches,
   getScores,
   findMatchByIdOrIndex,
@@ -93,6 +95,7 @@ describe('stats', () => {
       assert.ok(recent.length > 0);
       assert.equal(recent[0].winner, 'TestWinner');
       assert.equal(recent[0].loser, 'TestLoser');
+      assert.equal(recent[0].format, 'vs');
 
       const leaderboard = getLeaderboard();
       const winnerEntry = leaderboard.find((p) => p.name === 'TestWinner');
@@ -100,13 +103,13 @@ describe('stats', () => {
 
       assert.ok(winnerEntry);
       assert.ok(loserEntry);
-      assert.equal(winnerEntry.wins, 1);
+      assert.equal(winnerEntry.wins, 2);
       assert.equal(winnerEntry.losses, 0);
       assert.equal(winnerEntry.matches, 1);
       assert.equal(winnerEntry.winRate, 1.0);
 
       assert.equal(loserEntry.wins, 0);
-      assert.equal(loserEntry.losses, 1);
+      assert.equal(loserEntry.losses, 2);
       assert.equal(loserEntry.matches, 1);
       assert.equal(loserEntry.winRate, 0.0);
     });
@@ -217,7 +220,7 @@ describe('stats', () => {
       fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
 
       const res = handleScoreCommand('!score Roger & Rafa def Novak & Andy 6-4 6-2');
-      assert.match(res, /Recorded: Roger & Rafa def Novak & Andy/);
+      assert.match(res, /Recorded: Roger & Rafa vs Novak & Andy/);
 
       const leaderboard = getLeaderboard();
       const roger = leaderboard.find((p) => p.name === 'Roger');
@@ -225,10 +228,111 @@ describe('stats', () => {
       const novak = leaderboard.find((p) => p.name === 'Novak');
       const andy = leaderboard.find((p) => p.name === 'Andy');
 
-      assert.ok(roger && roger.wins === 1);
-      assert.ok(rafa && rafa.wins === 1);
-      assert.ok(novak && novak.losses === 1);
-      assert.ok(andy && andy.losses === 1);
+      assert.ok(roger && roger.wins === 2);
+      assert.ok(rafa && rafa.wins === 2);
+      assert.ok(novak && novak.losses === 2);
+      assert.ok(andy && andy.losses === 2);
+    });
+
+    it('should record vs directly and count W-L on sets even when second side wins', () => {
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+      const res = handleScoreCommand('!score Novak & Andy vs Roger & Rafa 4-6 2-6');
+      assert.match(res, /Recorded: Novak & Andy vs Roger & Rafa \(4-6 2-6\)\./);
+
+      const leaderboard = getLeaderboard();
+      const roger = leaderboard.find((p) => p.name === 'Roger');
+      const rafa = leaderboard.find((p) => p.name === 'Rafa');
+      const novak = leaderboard.find((p) => p.name === 'Novak');
+      const andy = leaderboard.find((p) => p.name === 'Andy');
+
+      assert.equal(roger.wins, 2);
+      assert.equal(rafa.wins, 2);
+      assert.equal(novak.losses, 2);
+      assert.equal(andy.losses, 2);
+      assert.equal(roger.gamesWon, 12);
+      assert.equal(roger.gamesLost, 6);
+
+      const scoresList = handleListScores();
+      assert.match(scoresList, /\*Novak & Andy\* vs \*Roger & Rafa\* \(4-6 2-6\)/);
+    });
+
+    it('should support 2-set split matches recorded as vs and count W-L per set', () => {
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+
+      const res = handleScoreCommand('!score Alice & Bob vs Charlie & Dave 6-4 3-6');
+      assert.match(res, /Recorded: Alice & Bob vs Charlie & Dave \(6-4 3-6\)\./);
+
+      const leaderboard = getLeaderboard();
+      const alice = leaderboard.find((p) => p.name === 'Alice');
+      const charlie = leaderboard.find((p) => p.name === 'Charlie');
+
+      // Alice & Bob: 9 games + 1 set (2 pts) = 11 pts, 1-1 sets, 1W 1L
+      assert.equal(alice.points, 11);
+      assert.equal(alice.gamesWon, 9);
+      assert.equal(alice.gamesLost, 10);
+      assert.equal(alice.setsWon, 1);
+      assert.equal(alice.setsLost, 1);
+      assert.equal(alice.wins, 1);
+      assert.equal(alice.losses, 1);
+
+      // Charlie & Dave: 10 games + 1 set (2 pts) = 12 pts, 1-1 sets, 1W 1L
+      assert.equal(charlie.points, 12);
+      assert.equal(charlie.wins, 1);
+      assert.equal(charlie.losses, 1);
+
+      const formatted = formatLeaderboard();
+      assert.match(formatted, /1\. Charlie — 12 pts \(10-9 games, 1-1 sets, 1W 1L\)/);
+    });
+
+    it('should treat incomplete sets as a win only when leader won at least 4 games', () => {
+      assert.equal(evaluateSetWinner(4, 2), 'A');
+      assert.equal(evaluateSetWinner(3, 5), 'B');
+      assert.equal(evaluateSetWinner(3, 2), null);
+      assert.equal(evaluateSetWinner(4, 4), null);
+
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+      handleScoreCommand('!score Alice vs Bob 4-2 3-2 4-4');
+
+      const leaderboard = getLeaderboard();
+      const alice = leaderboard.find((p) => p.name === 'Alice');
+      const bob = leaderboard.find((p) => p.name === 'Bob');
+
+      // Only 4-2 counts as a set win (3-2 has < 4 games, 4-4 is tied)
+      // Alice: 4+3+4 = 11 games + 1 set (2 pts) = 13 pts, 1W 0L
+      assert.equal(alice.points, 13);
+      assert.equal(alice.setsWon, 1);
+      assert.equal(alice.setsLost, 0);
+      assert.equal(alice.wins, 1);
+      assert.equal(alice.losses, 0);
+
+      // Bob: 2+2+4 = 8 games + 0 sets = 8 pts, 0W 1L
+      assert.equal(bob.points, 8);
+      assert.equal(bob.setsWon, 0);
+      assert.equal(bob.setsLost, 1);
+      assert.equal(bob.wins, 0);
+      assert.equal(bob.losses, 1);
+    });
+
+    it('should convert legacy def matches to vs format via migrateDefMatchesToVs', () => {
+      const legacy = {
+        availability: [],
+        matches: [
+          { id: 'm_legacy1', winner: 'Alice', loser: 'Bob', score: '6-4', date: new Date().toISOString() },
+          { id: 'm_legacy2', winner: 'Charlie', loser: 'Dave', score: '6-2', format: 'def', date: new Date().toISOString() }
+        ]
+      };
+      fs.writeFileSync(STATS_FILE, JSON.stringify(legacy));
+
+      const converted = migrateDefMatchesToVs();
+      assert.equal(converted, 2);
+
+      const recent = getRecentMatches(5);
+      assert.equal(recent.every((m) => m.format === 'vs'), true);
+
+      const listed = handleListScores();
+      assert.match(listed, /\*Alice\* vs \*Bob\* \(6-4\)/);
+      assert.match(listed, /\*Charlie\* vs \*Dave\* \(6-2\)/);
     });
   });
 
@@ -422,6 +526,27 @@ describe('stats', () => {
       assert.equal(recent[0].score, '6-0 6-0');
     });
 
+    it('should edit an existing score using vs and preserve vs format', async () => {
+      fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
+      handleScoreCommand('!score PlayerA def PlayerB 6-4 6-4');
+
+      const mockSock = {
+        groupMetadata: async () => ({
+          participants: [{ id: 'admin@s.whatsapp.net', admin: 'admin' }]
+        })
+      };
+
+      const editRes = await handleEditScore(mockSock, 'test@g.us', 'admin@s.whatsapp.net', 'Admin', '#1 PlayerA vs PlayerB 6-4 4-6');
+      assert.match(editRes, /Updated match score/);
+      assert.match(editRes, /\*Now:\* PlayerA vs PlayerB \(6-4 4-6\)/);
+
+      const recent = getRecentMatches(1);
+      assert.equal(recent[0].winner, 'PlayerA');
+      assert.equal(recent[0].loser, 'PlayerB');
+      assert.equal(recent[0].score, '6-4 4-6');
+      assert.equal(recent[0].format, 'vs');
+    });
+
     it('should reject unauthorized users from deleting or editing scores', async () => {
       fs.writeFileSync(STATS_FILE, JSON.stringify({ availability: [], matches: [] }));
 
@@ -557,7 +682,7 @@ describe('stats', () => {
 
       const TARGET_GROUP = "120363000000000003@g.us";
       const res = handleScoreCommand("!score Serena def Venus 6-4 6-4", TARGET_GROUP);
-      assert.match(res, /Recorded: Serena def Venus/);
+      assert.match(res, /Recorded: Serena vs Venus/);
 
       const board = getLeaderboard(TARGET_GROUP);
       assert.equal(board.length, 2);
