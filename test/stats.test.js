@@ -219,10 +219,10 @@ describe('stats', () => {
 
       const formatted = formatLeaderboard();
       assert.match(formatted, /🏆 \*Leaderboard/);
-      assert.match(formatted, /1\. Alice — 5\.60 avg \(12 pts, 6-4 games, 1W 0L sets\)/);
-      assert.match(formatted, /2\. Bob — 5\.60 avg \(12 pts, 6-4 games, 1W 0L sets\)/);
-      assert.match(formatted, /3\. Charlie — 4\.00 avg \(4 pts, 4-6 games, 0W 1L sets\)/);
-      assert.match(formatted, /4\. Dave — 4\.00 avg \(4 pts, 4-6 games, 0W 1L sets\)/);
+      assert.match(formatted, /🥇 \*Alice\* — \*5\.60 avg\*\n   1W–0L sets • 12 pts • 6–4 games \(\+2\)/);
+      assert.match(formatted, /🥈 \*Bob\* — \*5\.60 avg\*\n   1W–0L sets • 12 pts • 6–4 games \(\+2\)/);
+      assert.match(formatted, /🥉 \*Charlie\* — \*4\.00 avg\*\n   0W–1L sets • 4 pts • 4–6 games \(-2\)/);
+      assert.match(formatted, /4\. \*Dave\* — \*4\.00 avg\*\n   0W–1L sets • 4 pts • 4–6 games \(-2\)/);
       assert.match(formatted, /_Scoring: smoothed pts\/set \(Win: 10\+margin, Loss: 6-margin; \+16 pts \/ \+4 sets baseline\) • Tiebreaker: total pts, game diff_/);
     });
 
@@ -294,7 +294,7 @@ describe('stats', () => {
       assert.equal(charlie.losses, 1);
 
       const formatted = formatLeaderboard();
-      assert.match(formatted, /1\. Charlie — 5\.50 avg \(17 pts, 10-9 games, 1W 1L sets\)/);
+      assert.match(formatted, /🥇 \*Charlie\* — \*5\.50 avg\*\n   1W–1L sets • 17 pts • 10–9 games \(\+1\)/);
     });
 
     it('should treat incomplete sets as a win only when leader won at least 4 games', () => {
