@@ -533,5 +533,132 @@ describe('ratings', () => {
         ratings.setBotSocket(null);
       }
     });
+
+    it("parseProfileRatingDetails should extract Estimated Dynamic Rating and update date, and distinguish NTRP-only profiles", () => {
+      const dynamicHtml = `
+        <div>Player Profile</div>
+        <table>
+          <tr>
+            <td><span style="font-weight:bold;">3.5 C</span><br><span>12/31/2025</span></td>
+          </tr>
+          <tr>
+            <td style="text-align:left;">Estimated Dynamic Rating</td>
+            <td style="text-align:right;">
+              <span style="font-weight:bold;">3.4950 </span><br><span class="responsive12">11/5/2026</span>
+            </td>
+          </tr>
+        </table>
+      `;
+      const parsedDynamic = tennisRecord.parseProfileRatingDetails(dynamicHtml);
+      assert.equal(parsedDynamic.rating, 3.5);
+      assert.equal(parsedDynamic.dynamicRating, 3.5);
+      assert.equal(parsedDynamic.dynamicRatingDate, "2026-11-05");
+      assert.equal(parsedDynamic.isDynamicRating, true);
+
+      const ntrpOnlyHtml = `
+        <div>Player Profile</div>
+        <table>
+          <tr>
+            <td><span style="font-weight:bold;">4.0 B</span><br><span>12/31/2013</span></td>
+          </tr>
+          <tr>
+            <td style="text-align:left;">Estimated Dynamic Rating</td>
+            <td style="text-align:right;">
+              ------<br><span class="responsive12">----------</span>
+            </td>
+          </tr>
+        </table>
+      `;
+      const parsedNtrp = tennisRecord.parseProfileRatingDetails(ntrpOnlyHtml);
+      assert.equal(parsedNtrp.rating, 4.0);
+      assert.equal(parsedNtrp.dynamicRating, null);
+      assert.equal(parsedNtrp.dynamicRatingDate, null);
+      assert.equal(parsedNtrp.isDynamicRating, false);
+    });
+
+    it("refreshPeriodicRatings should overwrite locallyModified rating only when dynamic rating is both higher AND has a newer update date", async () => {
+      const namesStore = require("../lib/names");
+      const data = ratings.load();
+      const origFetch = tennisRecord.fetchTennisRecordRating;
+      const origFile = fs.readFileSync(ratings.RATINGS_FILE, "utf8");
+
+      const pHigherNewer = "mock_tr_higher_newer@lid";
+      const pHigherOlder = "mock_tr_higher_older@lid";
+      const pHigherSameDay = "mock_tr_higher_same@lid";
+      const pLowerNewer = "mock_tr_lower_newer@lid";
+      const pNtrpOnly = "mock_tr_ntrp_only@lid";
+
+      namesStore.setName(pHigherNewer, "Higher Newer");
+      namesStore.setName(pHigherOlder, "Higher Older");
+      namesStore.setName(pHigherSameDay, "Higher SameDay");
+      namesStore.setName(pLowerNewer, "Lower Newer");
+      namesStore.setName(pNtrpOnly, "NTRP Only");
+
+      const mockProfiles = {
+        "Higher Newer": { rating: 3.85, dynamicRating: 3.85, dynamicRatingDate: "2026-11-10", isDynamicRating: true },
+        "Higher Older": { rating: 3.90, dynamicRating: 3.90, dynamicRatingDate: "2026-11-01", isDynamicRating: true },
+        "Higher SameDay": { rating: 3.90, dynamicRating: 3.90, dynamicRatingDate: "2026-11-05", isDynamicRating: true },
+        "Lower Newer": { rating: 3.40, dynamicRating: 3.40, dynamicRatingDate: "2026-11-15", isDynamicRating: true },
+        "NTRP Only": { rating: 4.00, dynamicRating: null, dynamicRatingDate: null, isDynamicRating: false }
+      };
+
+      tennisRecord.fetchTennisRecordRating = async (name) => ({
+        success: true,
+        tennisRecord: true,
+        ...(mockProfiles[name] || { rating: 3.0, dynamicRating: null, dynamicRatingDate: null, isDynamicRating: false }),
+        profileUrl: `https://example.com/${encodeURIComponent(name)}`,
+        location: "San Jose, CA"
+      });
+
+      const localTs = "2026-11-05T18:00:00.000Z"; // 2026-11-05 10:00 PT
+      for (const lid of [pHigherNewer, pHigherOlder, pHigherSameDay, pLowerNewer, pNtrpOnly]) {
+        data.players[lid] = {
+          rating: 3.60,
+          locallyModified: true,
+          locallyModifiedAt: localTs,
+          tennisRecord: true,
+          tennisRecordUrl: "https://example.com/player",
+          tennisRecordLocation: "San Jose, CA",
+          lastRefreshedAt: "2026-10-01T00:00:00.000Z",
+          updatedAt: localTs
+        };
+      }
+
+      try {
+        await ratings.refreshPeriodicRatings({ force: true, delayMs: 0 });
+
+        assert.equal(
+          data.players[pHigherNewer].rating,
+          3.85,
+          "Higher dynamic rating with newer date must overwrite local rating"
+        );
+        assert.equal(
+          data.players[pHigherOlder].rating,
+          3.60,
+          "Higher dynamic rating with older date must NOT overwrite local rating"
+        );
+        assert.equal(
+          data.players[pHigherSameDay].rating,
+          3.60,
+          "Higher dynamic rating on the same calendar date must NOT overwrite local rating"
+        );
+        assert.equal(
+          data.players[pLowerNewer].rating,
+          3.60,
+          "Lower dynamic rating even with newer date must NOT overwrite local rating"
+        );
+        assert.equal(
+          data.players[pNtrpOnly].rating,
+          3.60,
+          "Higher NTRP-only benchmark rating without dynamic date must NOT overwrite local rating"
+        );
+      } finally {
+        for (const lid of [pHigherNewer, pHigherOlder, pHigherSameDay, pLowerNewer, pNtrpOnly]) {
+          delete data.players[lid];
+        }
+        tennisRecord.fetchTennisRecordRating = origFetch;
+        fs.writeFileSync(ratings.RATINGS_FILE, origFile, "utf8");
+      }
+    });
   });
 });
