@@ -1122,10 +1122,26 @@ if (require.main === module) {
   }, POLL_CLEANUP_INTERVAL_MINUTES * 60 * 1000);
 
   // Daily message history pruning sweep (runs once per 24 hours)
-  setInterval(() => {
+  setInterval(async () => {
+    if (botSock) {
+      try {
+        await playerCommands.publishMonthlyLeaderboards(botSock);
+      } catch (err) {
+        console.error('[leaderboard] Error publishing monthly leaderboard before prune:', err.message);
+      }
+    }
     messageHistory.pruneAllExpiredMessages();
     stats.pruneExpiredMatches();
   }, 24 * 60 * 60 * 1000);
+
+  // Check every 15 minutes at the start of a month (once outside quiet hours) to publish prior month leaderboard
+  setInterval(() => {
+    if (botSock) {
+      playerCommands.publishMonthlyLeaderboards(botSock).catch((err) => {
+        console.error('[leaderboard] Error in monthly leaderboard publish sweep:', err.message);
+      });
+    }
+  }, 15 * 60 * 1000);
 
   setInterval(() => {
     if (botSock) {
@@ -1325,6 +1341,9 @@ async function startBot() {
       }
 
       const context = getPollContext();
+      playerCommands.publishMonthlyLeaderboards(sock).catch((err) => {
+        console.error('[leaderboard] Error publishing monthly leaderboard on startup:', err.message);
+      });
       pollCommands.checkAndSendPollReminders(sock, context);
       pollCommands.checkCourtReleases(sock, context);
       recurringPollsModule.checkAndExecuteAdvanceBookings({
