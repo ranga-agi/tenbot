@@ -29,6 +29,9 @@ describe('commandRouter', () => {
     it('should handle !aliases', async () => {
       const res = await routeCommand(null, '!aliases', 'chat@g.us', 'Alice', {}, dummyContext);
       assert.match(res, /Player Names & Aliases|No player aliases/);
+
+      const listRes = await routeCommand(null, '!alias list', 'chat@g.us', 'Alice', {}, dummyContext);
+      assert.match(listRes, /Player Names & Aliases|No player aliases/);
     });
 
     it('should handle !free and !notfree', async () => {
@@ -236,6 +239,42 @@ describe('commandRouter', () => {
     it('should return error message for unknown tool', async () => {
       const res = await executeTool(null, 'chat@g.us', 'Alice', { name: 'non_existent_tool', input: {} }, {}, dummyContext);
       assert.match(res, /Unknown tool/);
+    });
+
+    it('should execute get_aliases tool for full list and specific lookup', async () => {
+      const namesStore = require('../lib/names');
+      const origGetAllEntries = namesStore.getAllEntries;
+      const origFind = namesStore.findIdByNameOrAlias;
+
+      const fakeEntries = [
+        { id: 'p1@lid', name: 'PI', fullName: 'Pramod Immaneni', aliases: ['Pramod'] },
+        { id: 'p2@lid', name: 'Bob', fullName: 'Bob Smith', aliases: [] }
+      ];
+      namesStore.getAllEntries = () => fakeEntries;
+      namesStore.findIdByNameOrAlias = (q) => {
+        const lower = String(q).trim().toLowerCase();
+        const found = fakeEntries.find(
+          (e) => e.name.toLowerCase() === lower || e.fullName.toLowerCase() === lower || e.aliases.some((a) => a.toLowerCase() === lower)
+        );
+        return found ? { id: found.id, entry: found } : null;
+      };
+
+      try {
+        const allRes = await executeTool(null, 'chat@g.us', 'PI', { name: 'get_aliases', input: {} }, {}, dummyContext);
+        assert.match(allRes, /Player Names & Aliases/);
+        assert.match(allRes, /PI \(aliases: Pramod\)/);
+
+        const lookupRes = await executeTool(null, 'chat@g.us', 'PI', { name: 'get_aliases', input: { alias: 'Pramod' } }, {}, dummyContext);
+        assert.match(lookupRes, /Alias lookup for "Pramod"/);
+        assert.match(lookupRes, /PI \(full name: Pramod Immaneni\) \(aliases: Pramod\)/);
+
+        const missingRes = await executeTool(null, 'chat@g.us', 'PI', { name: 'get_aliases', input: { alias: 'DeletedAlias' } }, {}, dummyContext);
+        assert.match(missingRes, /No player or alias matching "DeletedAlias" was found/);
+        assert.match(missingRes, /Player Names & Aliases/);
+      } finally {
+        namesStore.getAllEntries = origGetAllEntries;
+        namesStore.findIdByNameOrAlias = origFind;
+      }
     });
   });
 });

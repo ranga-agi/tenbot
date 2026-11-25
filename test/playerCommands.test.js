@@ -73,13 +73,94 @@ describe('playerCommands', () => {
 
   describe('parseAliasCommand', () => {
     it('should parse alias addition for self', () => {
-      const res = parseAliasCommand('!alias Johnny', 'John');
+      const res = parseAliasCommand('!setalias Johnny', 'John');
       assert.deepEqual(res, { name: 'John', alias: 'Johnny' });
+
+      const resAdd = parseAliasCommand('!addalias Johnny', 'John');
+      assert.deepEqual(resAdd, { name: 'John', alias: 'Johnny' });
     });
 
     it('should parse alias addition for another player', () => {
-      const res = parseAliasCommand('!alias John = Johnny');
+      const res = parseAliasCommand('!setalias John = Johnny');
       assert.deepEqual(res, { name: 'John', alias: 'Johnny' });
+
+      const resDel = parseAliasCommand('!deletealias John = Johnny');
+      assert.deepEqual(resDel, { name: 'John', alias: 'Johnny' });
+    });
+  });
+
+  describe('!alias and !setalias commands', () => {
+    it('should list caller aliases for !alias and named player aliases for !alias <name>', async () => {
+      const origGetAllEntries = namesStore.getAllEntries;
+      const origFind = namesStore.findIdByNameOrAlias;
+      const origResolveId = namesStore.resolveCanonicalId;
+      const origGetPn = namesStore.getPnByLid;
+
+      const fakeEntries = [
+        { id: '111@lid', name: 'Alice', fullName: 'Alice Wonderland', aliases: ['Ali', 'AW'] },
+        { id: '222@lid', name: 'Bob', fullName: 'Robert Smith', aliases: ['Bobby'] }
+      ];
+
+      namesStore.getAllEntries = () => fakeEntries;
+      namesStore.resolveCanonicalId = (id) => id;
+      namesStore.getPnByLid = () => null;
+      namesStore.findIdByNameOrAlias = (q) => {
+        const lower = String(q).trim().toLowerCase();
+        const found = fakeEntries.find(
+          (e) =>
+            e.id.toLowerCase() === lower ||
+            e.name.toLowerCase() === lower ||
+            e.fullName.toLowerCase() === lower ||
+            e.aliases.some((a) => a.toLowerCase() === lower)
+        );
+        return found ? { id: found.id, entry: found } : null;
+      };
+
+      try {
+        const sock = { groupMetadata: async () => ({ participants: [] }) };
+
+        const selfRes = await handlePlayerCommand(sock, '!alias', '120363@g.us', 'Someone', '111@lid');
+        assert.match(selfRes, /Aliases for "Alice"/);
+        assert.match(selfRes, /Alice \(full name: Alice Wonderland\) \(aliases: Ali, AW\)/);
+
+        const namedRes = await handlePlayerCommand(sock, '!alias Bob', '120363@g.us', 'Alice', '111@lid');
+        assert.match(namedRes, /Aliases for "Bob"/);
+        assert.match(namedRes, /Bob \(full name: Robert Smith\) \(aliases: Bobby\)/);
+
+        const unknownRes = await handlePlayerCommand(sock, '!alias UnknownPlayer', '120363@g.us', 'Alice', '111@lid');
+        assert.match(unknownRes, /No player or alias matching "UnknownPlayer" was found/);
+
+        const noCallerRes = await handlePlayerCommand(sock, '!alias', '120363@g.us', 'Charlie', '999@lid');
+        assert.match(noCallerRes, /No aliases recorded for "Charlie"/);
+        assert.match(noCallerRes, /!setalias <alias>/);
+      } finally {
+        namesStore.getAllEntries = origGetAllEntries;
+        namesStore.findIdByNameOrAlias = origFind;
+        namesStore.resolveCanonicalId = origResolveId;
+        namesStore.getPnByLid = origGetPn;
+      }
+    });
+
+    it('should use !setalias to add an alias and return usage when missing args', async () => {
+      const origAdd = namesStore.addAliasForPlayer;
+      const calls = [];
+      namesStore.addAliasForPlayer = (player, alias, senderJid, chatId) => {
+        calls.push({ player, alias, senderJid, chatId });
+        return { name: player, aliases: [alias] };
+      };
+
+      try {
+        const sock = { groupMetadata: async () => ({ participants: [] }) };
+        const badRes = await handlePlayerCommand(sock, '!setalias', '120363@g.us', 'Alice', '111@lid');
+        assert.match(badRes, /!setalias <alias>/);
+
+        const okRes = await handlePlayerCommand(sock, '!setalias Ali', '120363@g.us', 'Alice', '111@lid');
+        assert.match(okRes, /Added alias "Ali" for player "Alice"/);
+        assert.equal(calls.length, 1);
+        assert.deepEqual(calls[0], { player: 'Alice', alias: 'Ali', senderJid: '111@lid', chatId: '120363@g.us' });
+      } finally {
+        namesStore.addAliasForPlayer = origAdd;
+      }
     });
   });
 

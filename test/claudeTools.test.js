@@ -7,7 +7,7 @@ describe('claudeTools', () => {
     assert(Array.isArray(CLAUDE_TOOLS));
     assert(Array.isArray(CACHED_CLAUDE_TOOLS));
     assert.equal(CLAUDE_TOOLS.length, CACHED_CLAUDE_TOOLS.length);
-    assert.equal(CLAUDE_TOOLS.length, 47);
+    assert.equal(CLAUDE_TOOLS.length, 48);
   });
 
   it('should ensure each tool has name, description, and valid input_schema', () => {
@@ -43,6 +43,7 @@ describe('claudeTools', () => {
       'generate_matchups',
       'add_alias',
       'remove_alias',
+      'get_aliases',
       'set_full_name',
       'set_rating',
       'get_weather',
