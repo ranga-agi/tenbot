@@ -7,7 +7,7 @@ describe('claudeTools', () => {
     assert(Array.isArray(CLAUDE_TOOLS));
     assert(Array.isArray(CACHED_CLAUDE_TOOLS));
     assert.equal(CLAUDE_TOOLS.length, CACHED_CLAUDE_TOOLS.length);
-    assert.equal(CLAUDE_TOOLS.length, 48);
+    assert.equal(CLAUDE_TOOLS.length, 56);
   });
 
   it('should ensure each tool has name, description, and valid input_schema', () => {
@@ -45,7 +45,15 @@ describe('claudeTools', () => {
       'remove_alias',
       'get_aliases',
       'set_full_name',
+      'get_ratings',
       'set_rating',
+      'get_scores',
+      'report_score',
+      'edit_score',
+      'delete_score',
+      'get_leaderboard',
+      'get_availability',
+      'get_poll_status',
       'get_weather',
       'clear_all_polls',
       'cancel_poll',

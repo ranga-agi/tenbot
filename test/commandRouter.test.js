@@ -1,7 +1,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { routeCommand, executeTool, isAddressedToBot, stripLeadingTrigger } = require('../lib/commands/index');
-const { handleGroupLineup, getResponse } = require('../index');
+const { handleGroupLineup, buildContextBlurb, getResponse } = require('../index');
 
 describe('commandRouter', () => {
   const dummyContext = {
@@ -275,6 +275,237 @@ describe('commandRouter', () => {
         namesStore.getAllEntries = origGetAllEntries;
         namesStore.findIdByNameOrAlias = origFind;
       }
+    });
+
+    it('should execute get_ratings tool for group list and single player lookup', async () => {
+      const namesStore = require('../lib/names');
+      const ratings = require('../lib/ratings');
+      const origGetAllRatings = ratings.getAllRatings;
+      const origFindPlayer = ratings.findPlayer;
+      const origGetGroupMembers = namesStore.getGroupMembers;
+      const origFindName = namesStore.findIdByNameOrAlias;
+      const origGetName = namesStore.getName;
+
+      ratings.getAllRatings = () => [
+        { id: 'p1@lid', name: 'Alice', rating: 3.75 },
+        { id: 'p2@lid', name: 'Bob', rating: 3.25 },
+        { id: 'p3@lid', name: 'Outsider', rating: 4.1 }
+      ];
+      namesStore.getGroupMembers = () => new Set(['p1@lid', 'p2@lid']);
+      namesStore.findIdByNameOrAlias = (q) => {
+        if (String(q).toLowerCase() === 'ali' || String(q).toLowerCase() === 'alice' || q === 'p1@lid') {
+          return { id: 'p1@lid', entry: { name: 'Alice' } };
+        }
+        return null;
+      };
+      namesStore.getName = (id) => (id === 'p1@lid' ? 'Alice' : null);
+      ratings.findPlayer = (name, jid) => {
+        if (jid === 'p1@lid' || String(name).toLowerCase() === 'alice') {
+          return { key: 'p1@lid', entry: { rating: 3.75 } };
+        }
+        return null;
+      };
+
+      try {
+        const groupRes = await executeTool(null, 'chat@g.us', 'Alice', { name: 'get_ratings', input: {} }, {}, dummyContext);
+        assert.match(groupRes, /Alice — 3\.75/);
+        assert.match(groupRes, /Bob — 3\.25/);
+        assert.equal(groupRes.includes('Outsider'), false);
+
+        const singleRes = await executeTool(null, 'chat@g.us', 'Bob', { name: 'get_ratings', input: { player: 'Ali' } }, {}, dummyContext);
+        assert.match(singleRes, /Alice: 3\.75/);
+
+        const selfRes = await executeTool(null, 'chat@g.us', 'Alice', { name: 'get_ratings', input: { player: 'me' } }, { key: { participant: 'p1@lid', remoteJid: 'chat@g.us' } }, dummyContext);
+        assert.match(selfRes, /Alice: 3\.75/);
+
+        const missingRes = await executeTool(null, 'chat@g.us', 'Bob', { name: 'get_ratings', input: { player: 'Ghost' } }, {}, dummyContext);
+        assert.match(missingRes, /No recorded rating found for "Ghost"/);
+        assert.match(missingRes, /Alice — 3\.75/);
+      } finally {
+        ratings.getAllRatings = origGetAllRatings;
+        ratings.findPlayer = origFindPlayer;
+        namesStore.getGroupMembers = origGetGroupMembers;
+        namesStore.findIdByNameOrAlias = origFindName;
+        namesStore.getName = origGetName;
+      }
+    });
+
+    it('should execute report_score, get_scores, edit_score, delete_score, and get_leaderboard tools', async () => {
+      const fs = require('fs');
+      const stats = require('../lib/stats');
+      const ratings = require('../lib/ratings');
+      const namesStore = require('../lib/names');
+
+      const testGroupId = '120363999888777666@g.us';
+      const groupScoresFile = stats.getScoresFilePath(testGroupId);
+      const origFindName = namesStore.findIdByNameOrAlias;
+      const origGroupMembers = namesStore.getGroupMembers;
+
+      namesStore.findIdByNameOrAlias = (q) => {
+        const lower = String(q).trim().toLowerCase();
+        if (lower === 'ali' || lower === 'alice') return { id: 'p1@lid', entry: { name: 'Alice' } };
+        if (lower === 'bob') return { id: 'p2@lid', entry: { name: 'Bob' } };
+        return null;
+      };
+      namesStore.getGroupMembers = () => new Set(['p1@lid', 'p2@lid']);
+      ratings.setRating('Alice', 3.5);
+      ratings.setRating('Bob', 3.5);
+
+      try {
+        if (fs.existsSync(groupScoresFile)) fs.unlinkSync(groupScoresFile);
+
+        const sock = {
+          groupMetadata: async () => ({
+            participants: [{ id: 'p1@lid', admin: 'admin' }]
+          })
+        };
+        const msg = { key: { participant: 'p1@lid', remoteJid: testGroupId } };
+
+        // 1. Report score via structured args
+        const reportRes = await executeTool(null, testGroupId, 'Alice', {
+          name: 'report_score',
+          input: { side1: ['Ali'], side2: ['Bob'], score: '6-4, 7-5' }
+        }, msg, dummyContext);
+        assert.match(reportRes, /Recorded: Alice vs Bob \(6-4 7-5\)/);
+
+        // 2. Report second score via raw text
+        const reportTextRes = await executeTool(null, testGroupId, 'Alice', {
+          name: 'report_score',
+          input: { text: 'Bob vs Alice (6-3 6-4)' }
+        }, msg, dummyContext);
+        assert.match(reportTextRes, /Recorded: Bob vs Alice \(6-3 6-4\)/);
+
+        // 3. Get scores (filtered by player alias and limit)
+        const scoresRes = await executeTool(null, testGroupId, 'Alice', {
+          name: 'get_scores',
+          input: { player: 'Ali', limit: 1 }
+        }, msg, dummyContext);
+        assert.match(scoresRes, /Player: Alice/);
+        assert.match(scoresRes, /#1/);
+        assert.equal(scoresRes.includes('#2'), false);
+
+        // 4. Get leaderboard
+        const boardRes = await executeTool(null, testGroupId, 'Alice', {
+          name: 'get_leaderboard',
+          input: {}
+        }, msg, dummyContext);
+        assert.match(boardRes, /Leaderboard/);
+        assert.match(boardRes, /Alice/);
+        assert.match(boardRes, /Bob/);
+
+        // 5. Edit score #1
+        const editRes = await executeTool(sock, testGroupId, 'Alice', {
+          name: 'edit_score',
+          input: { scoreId: '#1', score: '6-2 6-2' }
+        }, msg, dummyContext);
+        assert.match(editRes, /Updated match score/);
+        assert.match(editRes, /6-2 6-2/);
+
+        // 6. Delete score #1
+        const delRes = await executeTool(sock, testGroupId, 'Alice', {
+          name: 'delete_score',
+          input: { scoreId: '#1' }
+        }, msg, dummyContext);
+        assert.match(delRes, /Deleted match score/);
+      } finally {
+        namesStore.findIdByNameOrAlias = origFindName;
+        namesStore.getGroupMembers = origGroupMembers;
+        if (fs.existsSync(groupScoresFile)) fs.unlinkSync(groupScoresFile);
+      }
+    });
+
+    it('should execute get_availability tool scoped to the group', async () => {
+      const fs = require('fs');
+      const stats = require('../lib/stats');
+      const testGroupId = '120363999888777555@g.us';
+      const groupAvailFile = stats.getAvailabilityFilePath(testGroupId);
+
+      try {
+        if (fs.existsSync(groupAvailFile)) fs.unlinkSync(groupAvailFile);
+
+        const emptyRes = await executeTool(null, testGroupId, 'Alice', {
+          name: 'get_availability',
+          input: {}
+        }, {}, dummyContext);
+        assert.match(emptyRes, /No one has marked themselves free yet/);
+
+        stats.setAvailable('Alice', 'Sat morning', testGroupId);
+        stats.setAvailable('Bob', 'Sun 4pm', testGroupId);
+
+        const listRes = await executeTool(null, testGroupId, 'Alice', {
+          name: 'get_availability',
+          input: {}
+        }, {}, dummyContext);
+        assert.match(listRes, /Who's free:/);
+        assert.match(listRes, /Alice – Sat morning/);
+        assert.match(listRes, /Bob – Sun 4pm/);
+      } finally {
+        if (fs.existsSync(groupAvailFile)) fs.unlinkSync(groupAvailFile);
+      }
+    });
+
+    it('should execute get_poll_status tool with active/targetId filters', async () => {
+      const testGroupId = '120363999888777444@g.us';
+      const otherGroupId = '120363999888777333@g.us';
+      const localActivePolls = new Map([
+        ['poll_1', {
+          remoteJid: testGroupId,
+          size: 4,
+          when: 'Saturday 9am',
+          status: 'active',
+          creator: { name: 'Alice', jid: 'p1@lid' },
+          options: ['Player 2', 'Player 3', 'Player 4']
+        }],
+        ['poll_2', {
+          remoteJid: testGroupId,
+          size: 4,
+          when: 'Sunday 4pm',
+          status: 'resolved',
+          creator: { name: 'Bob', jid: 'p2@lid' },
+          options: ['Player 2', 'Player 3', 'Player 4']
+        }],
+        ['poll_other', {
+          remoteJid: otherGroupId,
+          size: 4,
+          when: 'Monday 8am',
+          status: 'active',
+          creator: { name: 'Charlie', jid: 'p3@lid' },
+          options: ['Player 2', 'Player 3', 'Player 4']
+        }]
+      ]);
+      const pollContext = {
+        ...dummyContext,
+        activePolls: localActivePolls,
+        recurringPolls: new Map()
+      };
+
+      const activeRes = await executeTool(null, testGroupId, 'Alice', {
+        name: 'get_poll_status',
+        input: { filter: 'active' }
+      }, {}, pollContext);
+      assert.match(activeRes, /Poll poll_1/);
+      assert.equal(activeRes.includes('poll_2'), false);
+      assert.equal(activeRes.includes('poll_other'), false);
+
+      const targetRes = await executeTool(null, testGroupId, 'Alice', {
+        name: 'get_poll_status',
+        input: { targetId: 'Sunday 4pm' }
+      }, {}, pollContext);
+      assert.match(targetRes, /Poll poll_2/);
+      assert.equal(targetRes.includes('poll_1'), false);
+    });
+  });
+
+  describe('buildContextBlurb', () => {
+    it('should omit static leaderboard, recent matches, availability, active polls, and recurring polls from context blurb', () => {
+      const blurb = buildContextBlurb('120363000000000000@g.us');
+      assert.equal(blurb.includes('Leaderboard (top 5):'), false);
+      assert.equal(blurb.includes('Recent matches:'), false);
+      assert.equal(blurb.includes('Current availability:'), false);
+      assert.equal(blurb.includes('Active poll:'), false);
+      assert.equal(blurb.includes('Recurring daily polls:'), false);
+      assert.match(blurb, /Current time in San Jose, CA \(Pacific Time\):/);
+      assert.match(blurb, /Group Chat History \(Past 2 Weeks\)/);
     });
   });
 });

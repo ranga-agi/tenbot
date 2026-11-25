@@ -118,16 +118,16 @@ const SYSTEM_PROMPT =
   'conversational (1-3 sentences) unless asked for more detail. You have ' +
   "access to tools to create match polls (fixed-spot polls for 2 singles or 4/8/12 doubles, " +
   "or Yes/No opt-in polls when no number of players is specified), generate matchups from poll votes, " +
-  "set/update player ratings, check weather, cancel/delete polls, schedule recurring match polls on specific days of the week or every day with customizable poll creation times, optional start date and end date (schedule_recurring_poll), modify recurring schedules including start/end dates (modify_recurring_poll), list recurring schedules (list_recurring_polls), pause recurring schedules indefinitely or until a specific date after which they resume automatically (pause_recurring_poll), resume recurring schedules (resume_recurring_poll), skip one or more upcoming instances of a recurring poll (skip_recurring_poll_instance), restore skipped instances (unskip_recurring_poll_instance), and access the group's availability list, win/loss leaderboard, " +
-  'and active polls (given below). Multiple polls can be created for different times or by different users. ' +
+  "set/update player ratings, query/report/edit/delete match scores (get_scores, report_score, edit_score, delete_score), fetch the win/loss leaderboard (get_leaderboard), check weather, cancel/delete polls, schedule recurring match polls on specific days of the week or every day with customizable poll creation times, optional start date and end date (schedule_recurring_poll), modify recurring schedules including start/end dates (modify_recurring_poll), list recurring schedules (list_recurring_polls), pause recurring schedules indefinitely or until a specific date after which they resume automatically (pause_recurring_poll), resume recurring schedules (resume_recurring_poll), skip one or more upcoming instances of a recurring poll (skip_recurring_poll_instance), restore skipped instances (unskip_recurring_poll_instance), and access the group's availability list " +
+  'check who is free/available (get_availability), and inspect active, upcoming, or tracked match polls (get_poll_status). Multiple polls can be created for different times or by different users. ' +
   'The live local time in San Jose, CA is provided at the top of the context blurb below. ' +
   'Polls created manually by users for organizing tennis matches are passively tracked by the bot (marked as user-created / isManual). ' +
   'Non-match polls (such as food, social, or general polls) are not tracked. ' +
   'For tracked manual match polls, do not make any changes or auto-generate matchups when they fill up. ' +
   'Answer questions about manual match polls when asked (who voted, who is playing, current count, etc.). ' +
-  'For manual match polls, the context blurb below provides the exact "Players currently in/playing" list based on the rules. ' +
-  'When asked who is playing, who has voted, or how many spots are left, rely strictly on the provided "Players currently in/playing" list. ' +
-  'Do NOT include the creator unless they actually voted or are explicitly listed in "Players currently in/playing". ' +
+  'When asked about active or tracked polls, who is playing, who has voted, how many spots are left, or recurring schedules, ALWAYS call get_poll_status (or list_recurring_polls for recurring schedule configuration) first to fetch the live poll details. ' +
+  'For manual and fixed-spot match polls, get_poll_status provides the exact "Currently playing" list based on the rules — rely strictly on it. ' +
+  'Do NOT include the creator unless they actually voted or are explicitly listed in "Currently playing". ' +
   'For polls starting at slot 1, extra players / creator are NEVER included while voting is still in progress (only when all vote slots are filled and count is invalid). ' +
   'Always give preference to lineup messages in chats over lineups in polls. When users discuss, share, or ask questions about lineups, court assignments, teams, matchups, or who is playing whom, any lineup message posted by players in the group chat takes precedence over poll options, poll votes, or automated poll-generated matchups. ' +
   'When a user asks to generate matchups, create the draw, make teams, or rematch for ANY match poll (including manually created match polls, opt-in polls, or previously resolved polls), ' +
@@ -135,9 +135,11 @@ const SYSTEM_PROMPT =
   'If there are multiple polls or a specific poll is requested (e.g. "for 10am", "Tennis 8am"), pass pollId or pollName to generate_matchups. ' +
   'When a user shares, posts, updates, or asks to parse or record match lineups, court assignments, teams, or rotations (e.g. "Court 1: Alice & Bob vs Charlie & David", "Set 1: Court 2 Mike / Sara vs John / Alex", "@P1 @P2 @P3 @P4 - Court 6 7pm"), ALWAYS call the parse_lineup tool. If the number of players listed in a lineup is 1 less than a valid player configuration (e.g. 1 player for singles, 3 players for 1 doubles court, 7 players for 2 courts, 11 players for 3 courts), include the message sender or poll creator to complete the underfilled court. ' +
   'Results can be reported to you in plain words ("Mike & Sara vs John & Alex 6-4 4-6", "Mike & Sara ' +
-  'beat John & Alex 6-4", or "we won" right after a draw) and are logged automatically before ' +
-  "you see the message, so don't claim you can't record scores. " +
+  'beat John & Alex 6-4", or "we won" right after a draw), or by asking you to log/record a score — ' +
+  "if a score wasn't already auto-logged, call report_score to record it. Use get_scores when asked about past matches/scores, " +
+  'edit_score or delete_score when asked to modify or remove a recorded score, and get_leaderboard when asked about standings/leaderboard. ' +
   'Initial ratings for new players are looked up from TennisRecord.com (defaulting to 3.0 if not found). ' +
+  'Use get_ratings to look up player ratings (2.50-4.50 scale; a pairing\'s rating is the sum of its two players) when asked about ratings or when comparing/evaluating matchups. ' +
   'Users can also change their own rating by addressing you (e.g. "@tenbot my rating is 4.0" or "@tenbot set my rating to 3.5") -- ' +
   'call the set_rating or reset_rating tool to update it. Group admins can also update or reset ratings for other players. ' +
   'When creating a poll: ' +
@@ -165,7 +167,7 @@ const SYSTEM_PROMPT =
   'When a user message includes a quoted message in the format `[Replying to <Sender>: "<quoted text>"]`, ' +
   'use the quoted message as direct context for what the user is asking about. ' +
   'For example, if the user asks why they were or were not included/mentioned in a quoted reminder or announcement, ' +
-  'check whether they had voted or joined the poll before that reminder was sent (e.g., if they voted after the reminder was posted, explain that their name was not in the reminder because they had not voted yet at that time, and confirm their current status in the poll). ' +
+  'check their current poll status/membership using get_poll_status and compare against whether they had voted or joined the poll before that reminder was sent (e.g., if they voted after the reminder was posted, explain that their name was not in the reminder because they had not voted yet at that time, and confirm their current status in the poll). ' +
   'When a message contains a request alongside other questions, execute the appropriate tools and answer naturally.';
 
 if (!process.env.ANTHROPIC_API_KEY) {
@@ -355,110 +357,10 @@ function buildContextBlurb(chatId) {
     hour12: true
   }).format(new Date());
 
-  const availability = stats.getAvailability();
-  const board = stats.getLeaderboard();
-  const recent = stats.getRecentMatches(5);
-
-  const availabilityText = availability.length
-    ? availability.map((a) => `${a.player} (${a.when})`).join(', ')
-    : 'no one has marked themselves free right now';
-
-  const leaderboardText = board.length
-    ? board.slice(0, 5).map((p) => `${p.name}: ${typeof p.score === 'number' ? p.score.toFixed(2) : p.points} avg (${p.points} pts, ${p.wins}W-${p.losses}L)`).join(', ')
-    : 'no matches recorded yet';
-
-  const recentText = recent.length
-    ? recent.map((m) => `${m.winner} vs ${m.loser} (${m.score})`).join('; ')
-    : 'none';
-
-  const mePn = jidNormalizedUser(botSock?.user?.id || botSock?.authState?.creds?.me?.id || '');
-  const chatPolls = [...activePolls.entries()].filter(([, state]) => state.remoteJid === chatId);
-  let pollText = 'no active poll';
-  if (chatPolls.length > 0) {
-    const pollDescriptions = chatPolls.map(([id, pollState]) => {
-      const whenSuffix = pollState.when ? ` for ${pollState.when}` : '';
-      const isOptIn = pollState.type === 'opt_in' || pollState.size === null || pollState.options?.some((o) => /^yes$/i.test(o.trim()));
-
-      if (isOptIn) {
-        const { interestedPlayers } = pollCommands.getPollVoters(id, pollState, mePn, messageStore);
-        const yesNames = interestedPlayers || [];
-        const yesCount = yesNames.length;
-        if (pollState.status === 'cancelled') {
-          return `[Poll ${id}] a Yes/No opt-in poll${whenSuffix} was cancelled`;
-        }
-        const creatorDesc = pollState.creator?.name ? ` (created by ${pollState.creator.name})` : '';
-        const statusNote = pollState.status === 'resolved' ? 'status: resolved/drawn (can rematch)' : (pollState.status === 'stopped' ? 'status: stopped (voting stopped)' : (pollState.status === 'expired' ? 'status: expired (play time passed, can still generate matchups if requested)' : 'status: active'));
-        const manualLineupSnippet = (pollState.manualLineupPosted && pollState.manualLineupText)
-          ? ` Active lineup posted in chat: "${pollState.manualLineupText.replace(/\s+/g, ' ').trim()}" (preferred over poll votes).`
-          : '';
-        return `[Poll ${id}] a Yes/No opt-in poll${whenSuffix}${creatorDesc} is tracked with ${yesCount} "Yes" vote(s) (${yesNames.join(', ') || 'none yet'}).${manualLineupSnippet} (${statusNote})`;
-      }
-
-      if (pollState.isManual) {
-        const { aggregated, interestedPlayers } = pollCommands.getPollVoters(id, pollState, mePn, messageStore);
-        const optionDetails = [];
-        for (const opt of aggregated) {
-          const names = opt.voters.map(nameFor);
-          if (names.length > 0) optionDetails.push(`${opt.name}: ${names.join(', ')}`);
-        }
-        const { players: playingPlayers, addedFromLabel, addedFromValidCount } = pollCommands.resolveManualPollPlayers(pollState, interestedPlayers);
-        const creatorName = pollState.creator?.name || 'Someone';
-
-        let additionNotes = [];
-        if (addedFromLabel.length > 0) additionNotes.push(`[${addedFromLabel.join(', ')}] from poll slot labels / title`);
-        if (addedFromValidCount.length > 0) additionNotes.push(`[${addedFromValidCount.join(', ')}] to reach valid player count`);
-        const additionSuffix = additionNotes.length > 0 ? ` (includes ${additionNotes.join(' and ')})` : '';
-
-        if (pollState.status === 'cancelled') {
-          return `[Poll ${id}] a user-created manual match poll "${pollState.name || 'Match Poll'}" was cancelled`;
-        }
-        const statusNote = pollState.status === 'resolved' ? 'status: resolved/drawn (can generate matchups again / rematch)' : (pollState.status === 'filled' ? 'status: filled (all voting slots filled, waiting for matchup request)' : (pollState.status === 'stopped' ? 'status: stopped (voting stopped, call generate_matchups when ready)' : (pollState.status === 'expired' ? 'status: expired (play time passed, can still generate matchups if requested)' : 'status: active')));
-        const manualLineupSnippet = (pollState.manualLineupPosted && pollState.manualLineupText)
-          ? ` Active lineup posted in chat: "${pollState.manualLineupText.replace(/\s+/g, ' ').trim()}" (preferred over poll votes).`
-          : '';
-        return `[Poll ${id}] a user-created manual match poll "${pollState.name || 'Match Poll'}" (created by ${creatorName}) is tracked with ${interestedPlayers.length} vote(s): [${optionDetails.join('; ') || 'no votes yet'}]. Players currently in/playing (${playingPlayers.length}): ${playingPlayers.join(', ')}${additionSuffix}.${manualLineupSnippet} (${statusNote} -- when asked to generate matchups or draw, call generate_matchups)`;
-      }
-
-      const { aggregated } = pollCommands.getPollVoters(id, pollState, mePn, messageStore);
-      const { players: currentPlayers, filledCount, totalSlotsCount } = pollCommands.resolveFixedPollRoster(pollState, aggregated);
-      const hasPrebooked = Array.isArray(pollState.prebookedPlayers) && pollState.prebookedPlayers.length > 0;
-      const creatorSuffix = pollState.creator && !hasPrebooked ? ` (created by ${pollState.creator.name || 'Player 1'}, who is Player 1)` : ' (all spots open)';
-      const prebookedSuffix = hasPrebooked
-        ? ` (includes prebooked spots: ${pollState.prebookedPlayers.map((p) => typeof p === 'string' ? `${p}'s Spot` : p.slotName).join(', ')})`
-        : '';
-      if (pollState.status === 'cancelled') {
-        return `[Poll ${id}] a ${pollState.size}-spot poll${whenSuffix} was cancelled`;
-      }
-      const statusNote = pollState.status === 'resolved' ? 'status: resolved/drawn (can rematch)' : (pollState.status === 'filled' ? 'status: filled (all slots filled, waiting for matchup request)' : (pollState.status === 'stopped' ? 'status: stopped (voting stopped)' : (pollState.status === 'expired' ? 'status: expired (play time passed, can still generate matchups if requested)' : 'status: active')));
-      const manualLineupSnippet = (pollState.manualLineupPosted && pollState.manualLineupText)
-        ? ` Active lineup posted in chat: "${pollState.manualLineupText.replace(/\s+/g, ' ').trim()}" (preferred over poll votes).`
-        : '';
-      return `[Poll ${id}] a ${pollState.size}-spot poll${whenSuffix}${creatorSuffix}${prebookedSuffix} is tracked with ${filledCount}/${totalSlotsCount} slots filled. Players currently in/playing (${currentPlayers.length}): ${currentPlayers.join(', ')}.${manualLineupSnippet} (${statusNote})`;
-    });
-    pollText = pollDescriptions.join('; ');
-  }
-
-  const rated = ratings.getAllRatings();
-  const ratingsText = rated.length
-    ? rated.map((p) => `${p.name}: ${ratings.formatRating(p.rating)}`).join(', ')
-    : 'nobody rated yet';
-
-  const chatRecurring = [...recurringPolls.values()].filter((s) => !chatId.endsWith('@g.us') || s.remoteJid === chatId);
-  let recurringText = 'none';
-  if (chatRecurring.length > 0) {
-    recurringText = chatRecurring.map((s) => `[ID: ${s.id}] ${s.size ? `${s.size} spots` : 'Opt-in'} for ${s.matchDisplay} (${s.daysDisplay || s.days || 'everyday'}) (posts at ${s.postDisplay}, status: ${s.enabled ? 'active' : 'paused'})`).join('; ');
-  }
-
   const groupChatLog = messageHistory.formatRecentMessagesForContext(chatId);
 
   return (
-    `Current time in San Jose, CA (Pacific Time): ${sjTimeStr}\n` +
-    `Current availability: ${availabilityText}\n` +
-    `Leaderboard (top 5): ${leaderboardText}\n` +
-    `Recent matches: ${recentText}\n` +
-    `Player ratings (${ratings.formatRating(ratings.MIN_RATING)}-${ratings.MAX_RATING}, a pairing's rating is the sum of its two players'): ${ratingsText}\n` +
-    `Active poll: ${pollText}\n` +
-    `Recurring daily polls: ${recurringText}\n\n` +
+    `Current time in San Jose, CA (Pacific Time): ${sjTimeStr}\n\n` +
     `--- Group Chat History (Past 2 Weeks) ---\n${groupChatLog}\n--- End of Group Chat History ---`
   );
 }
@@ -502,7 +404,7 @@ async function callClaude(sock, chatId, sender, promptText, msg, options = {}) {
         'IMPORTANT SILENT-IGNORE RULE FOR THIS MESSAGE:\n' +
         'The user replied to/quoted a message or poll posted by Tenbot WITHOUT explicitly addressing @tenbot.\n' +
         'ONLY respond if the user is genuinely asking a question whose answer you actually know from the tennis group context, ' +
-        'active/recurring polls, match lineups, court availability/bookings, player ratings, player activity, weather, or group chat history ' +
+        'active/recurring polls, player availability, match lineups, court availability/bookings, player ratings, player activity, match scores, leaderboard, weather, or group chat history ' +
         '(you may call tools first to look up the answer if needed).\n' +
         'If the user is NOT asking a question for the bot (e.g. casual comment, acknowledgment, statement, or coordinating logistics like rides, balls, or running late with other players), ' +
         'OR if you do NOT know the answer to their question from your data, tools, or chat history, ' +
@@ -1803,5 +1705,6 @@ module.exports = {
   resolveManualPollPlayers: pollCommands.resolveManualPollPlayers,
   hasTimeSpecifiedInTitle: pollCommands.hasTimeSpecifiedInTitle,
   handleGroupLineup,
+  buildContextBlurb,
   getResponse
 };
