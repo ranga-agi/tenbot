@@ -12,7 +12,8 @@ describe('scoreReport', () => {
         john: 'John',
         alex: 'Alex',
         alice: 'Alice',
-        bob: 'Bob'
+        bob: 'Bob',
+        'mary-jane': 'Mary-Jane'
       };
       return known[lower] || null;
     },
@@ -59,6 +60,36 @@ describe('scoreReport', () => {
     assert.deepEqual(doublesReport.winners, ['Mike', 'Sara']);
     assert.deepEqual(doublesReport.losers, ['John', 'Alex']);
     assert.deepEqual(doublesReport.sets, [[3, 6], [6, 4], [10, 8]]);
+  });
+
+  it('should parse comma-separated scores, parenthesized scores, and hyphenated doubles sides', () => {
+    const commaReport = parseScoreReport('Mike & Sara vs John & Alex 6-4, 7-5', dummyOptions);
+    assert.ok(commaReport);
+    assert.deepEqual(commaReport.winners, ['Mike', 'Sara']);
+    assert.deepEqual(commaReport.losers, ['John', 'Alex']);
+    assert.deepEqual(commaReport.sets, [[6, 4], [7, 5]]);
+
+    const parenReport = parseScoreReport('Mike & Sara vs John & Alex (6-4 7-5)', dummyOptions);
+    assert.ok(parenReport);
+    assert.deepEqual(parenReport.winners, ['Mike', 'Sara']);
+    assert.deepEqual(parenReport.losers, ['John', 'Alex']);
+    assert.deepEqual(parenReport.sets, [[6, 4], [7, 5]]);
+
+    const parenTiebreakReport = parseScoreReport('Mike & Sara beat John & Alex (7-6(4), 6-4)', dummyOptions);
+    assert.ok(parenTiebreakReport);
+    assert.deepEqual(parenTiebreakReport.sets, [[7, 6], [6, 4]]);
+
+    const hyphenReport = parseScoreReport('Mike-Sara vs John-Alex 6-4 7-5', dummyOptions);
+    assert.ok(hyphenReport);
+    assert.deepEqual(hyphenReport.winners, ['Mike', 'Sara']);
+    assert.deepEqual(hyphenReport.losers, ['John', 'Alex']);
+    assert.deepEqual(hyphenReport.sets, [[6, 4], [7, 5]]);
+
+    const knownHyphenatedPlayer = parseScoreReport('Mary-Jane vs Bob (6-4, 7-5)', dummyOptions);
+    assert.ok(knownHyphenatedPlayer);
+    assert.deepEqual(knownHyphenatedPlayer.winners, ['Mary-Jane']);
+    assert.deepEqual(knownHyphenatedPlayer.losers, ['Bob']);
+    assert.deepEqual(knownHyphenatedPlayer.sets, [[6, 4], [7, 5]]);
   });
 
   it('should return null for "A vs B" when no score is given', () => {

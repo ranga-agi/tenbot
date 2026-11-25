@@ -8,19 +8,24 @@ const {
   parseFullNameCommand,
   parseAliasCommand,
   handleScoreCommand,
+  handleEditScore,
   parseMatchResultExpression,
   handlePlayerCommand,
   splitScoreCommandEntries,
   nameFor,
   canUserManagePlayerAlias
 } = require('../lib/commands/player');
+const namesStore = require('../lib/names');
+const stats = require('../lib/stats');
 
 describe('playerCommands', () => {
   describe('parseSide', () => {
-    it('should split partners separated by & or and', () => {
+    it('should split partners separated by &, and, +, or hyphen', () => {
       assert.deepEqual(parseSide('Mike & Sara'), ['Mike', 'Sara']);
       assert.deepEqual(parseSide('Mike and Sara'), ['Mike', 'Sara']);
       assert.deepEqual(parseSide('Mike + Sara'), ['Mike', 'Sara']);
+      assert.deepEqual(parseSide('Mike-Sara'), ['Mike', 'Sara']);
+      assert.deepEqual(parseSide('Mike - Sara'), ['Mike', 'Sara']);
     });
 
     it('should return a single player when no delimiter exists', () => {
@@ -179,6 +184,108 @@ describe('playerCommands', () => {
 
       const resVDot = parseMatchResultExpression('Alice v. Bob 3-6 6-4 6-7(5)');
       assert.deepEqual(resVDot, { winners: ['Alice'], losers: ['Bob'], sets: [[3, 6], [6, 4], [6, 7]], format: 'vs' });
+    });
+
+    it('should parse comma-separated scores, parenthesized scores, and hyphenated doubles sides', () => {
+      const resComma = parseMatchResultExpression('Mike & Sara vs John & Alex 6-4, 7-5');
+      assert.deepEqual(resComma, {
+        winners: ['Mike', 'Sara'],
+        losers: ['John', 'Alex'],
+        sets: [[6, 4], [7, 5]],
+        format: 'vs'
+      });
+
+      const resParens = parseMatchResultExpression('Mike & Sara vs John & Alex (6-4 7-5)');
+      assert.deepEqual(resParens, {
+        winners: ['Mike', 'Sara'],
+        losers: ['John', 'Alex'],
+        sets: [[6, 4], [7, 5]],
+        format: 'vs'
+      });
+
+      const resParensCommaTiebreak = parseMatchResultExpression('Mike & Sara vs John & Alex (7-6(4), 6-4)');
+      assert.deepEqual(resParensCommaTiebreak, {
+        winners: ['Mike', 'Sara'],
+        losers: ['John', 'Alex'],
+        sets: [[7, 6], [6, 4]],
+        format: 'vs'
+      });
+
+      const resHyphenPlayers = parseMatchResultExpression('Mike-Sara vs John-Alex 6-4 7-5');
+      assert.deepEqual(resHyphenPlayers, {
+        winners: ['Mike', 'Sara'],
+        losers: ['John', 'Alex'],
+        sets: [[6, 4], [7, 5]],
+        format: 'vs'
+      });
+
+      const resCombined = parseMatchResultExpression('Mike-Sara vs John-Alex (6-4, 7-5)');
+      assert.deepEqual(resCombined, {
+        winners: ['Mike', 'Sara'],
+        losers: ['John', 'Alex'],
+        sets: [[6, 4], [7, 5]],
+        format: 'vs'
+      });
+    });
+
+    it('should preserve a registered hyphenated player name in chat when matched as a single player', () => {
+      const origFind = namesStore.findIdByNameOrAlias;
+      namesStore.findIdByNameOrAlias = (name) => {
+        if (name === 'Mary-Jane') return { id: 'mj@lid', entry: { name: 'Mary-Jane' } };
+        if (name === 'Bob') return { id: 'bob@lid', entry: { name: 'Bob' } };
+        return null;
+      };
+      try {
+        const res = parseMatchResultExpression('Mary-Jane vs Bob 6-4 7-5', '120363@g.us');
+        assert.deepEqual(res, {
+          winners: ['Mary-Jane'],
+          losers: ['Bob'],
+          sets: [[6, 4], [7, 5]],
+          format: 'vs'
+        });
+      } finally {
+        namesStore.findIdByNameOrAlias = origFind;
+      }
+    });
+  });
+
+  describe('handleEditScore', () => {
+    it('should support parenthesized and comma-separated scores as well as hyphenated sides', async () => {
+      const origFindMatch = stats.findMatchByIdOrIndex;
+      const origUpdateMatch = stats.updateMatch;
+      const updates = [];
+
+      const fakeMatch = {
+        id: 'm_test_1',
+        winner: 'Alice',
+        loser: 'Bob',
+        winners: ['Alice'],
+        losers: ['Bob'],
+        score: '6-4 6-4',
+        sets: [[6, 4], [6, 4]]
+      };
+      stats.findMatchByIdOrIndex = () => fakeMatch;
+      stats.updateMatch = (id, upd) => {
+        updates.push({ id, upd });
+        return { ...fakeMatch, ...upd };
+      };
+
+      try {
+        const sock = { groupMetadata: async () => ({ participants: [] }) };
+        const resScoreOnly = await handleEditScore(sock, '120363@g.us', 'alice@s.whatsapp.net', 'Alice', '#1 (6-4, 7-5)');
+        assert.match(resScoreOnly, /Updated match score/);
+        assert.deepEqual(updates[0].upd.sets, [[6, 4], [7, 5]]);
+        assert.equal(updates[0].upd.score, '6-4 7-5');
+
+        const resFull = await handleEditScore(sock, '120363@g.us', 'alice@s.whatsapp.net', 'Alice', '#1 Mike-Sara vs John-Alex (6-4 7-5)');
+        assert.match(resFull, /Updated match score/);
+        assert.deepEqual(updates[1].upd.winners, ['Mike', 'Sara']);
+        assert.deepEqual(updates[1].upd.losers, ['John', 'Alex']);
+        assert.deepEqual(updates[1].upd.sets, [[6, 4], [7, 5]]);
+      } finally {
+        stats.findMatchByIdOrIndex = origFindMatch;
+        stats.updateMatch = origUpdateMatch;
+      }
     });
   });
 
