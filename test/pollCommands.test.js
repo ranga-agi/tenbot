@@ -1688,8 +1688,9 @@ describe('pollCommands', () => {
       const success = await sendPollReminder(mockSock, pollId, pollState, true, { messageStore });
       assert.equal(success, true);
       assert.ok(sentMsg);
-      assert.match(sentMsg.text, /\*1 player\(s\)/i);
-      assert.match(sentMsg.text, /Conrad/);
+      assert.match(sentMsg.text, /1 player\(s\) in/i);
+      assert.match(sentMsg.text, /@14085559110/);
+      assert.ok(Array.isArray(sentMsg.mentions) && sentMsg.mentions.includes('165777365799110@lid'));
       assert.doesNotMatch(sentMsg.text, /\*0 player\(s\) in\*/i);
     });
 
@@ -1754,8 +1755,9 @@ describe('pollCommands', () => {
 
       await sendPollReminder(mockSock, pollId, reloadedPoll, true, { messageStore: reloaded.messageStore });
       assert.ok(sentMsg);
-      assert.match(sentMsg.text, /\*1 player\(s\)\*/i);
-      assert.match(sentMsg.text, /Conrad/);
+      assert.match(sentMsg.text, /1 player\(s\) in/i);
+      assert.match(sentMsg.text, /@14085559110/);
+      assert.ok(Array.isArray(sentMsg.mentions) && sentMsg.mentions.includes('165777365799110@lid'));
       assert.doesNotMatch(sentMsg.text, /\*0 player\(s\)\*/i);
     });
 
@@ -7791,8 +7793,9 @@ describe('pollCommands', () => {
       await checkAndSendPollReminders(mockSock, context, now);
 
       assert.equal(messagesSent.length, 1, "Should send only 1 combined reminder for split poll");
-      assert.match(messagesSent[0].content.text, /12 more players/);
-      assert.match(messagesSent[0].content.text, /16 total spots/);
+      assert.match(messagesSent[0].content.text, /12 spots left/);
+      assert.match(messagesSent[0].content.text, /Confirmed \(4\)/);
+      assert.match(messagesSent[0].content.text, /Need 4 players/);
       assert.match(messagesSent[0].content.text, /Alice/);
       assert.equal(messagesSent[0].opts.quoted.key.id, "poll_split_p1");
       assert.ok(part1State.sentReminders.includes(8) && part2State.sentReminders.includes(8), "Both parts should mark 8h reminder as sent");
@@ -7891,10 +7894,12 @@ describe('pollCommands', () => {
       await checkAndSendPollReminders(mockSock, context, now);
 
       assert.equal(messagesSent.length, 1);
-      assert.match(messagesSent[0].content.text, /3 more players/i);
+      assert.match(messagesSent[0].content.text, /Need 3 players/i);
+      assert.match(messagesSent[0].content.text, /3 spots left/i);
       assert.equal(messagesSent[0].opts.quoted.key.id, "poll_f_2", "Should quote the active part where open spots live");
       assert.match(messagesSent[0].content.text, /Player \(1001\)/);
-      assert.match(messagesSent[0].content.text, /Player \(1013\)/);
+      assert.match(messagesSent[0].content.text, /@14085551013/);
+      assert.ok(Array.isArray(messagesSent[0].content.mentions) && messagesSent[0].content.mentions.includes("14085551013@s.whatsapp.net"));
       assert.equal(part1State.reminderCount, 3);
       assert.equal(part2State.reminderCount, 3);
       assert.ok(part1State.sentReminders.includes(4) && part2State.sentReminders.includes(4));
@@ -8085,7 +8090,9 @@ describe('pollCommands', () => {
 
       await checkAndSendPollReminders(mockSock, context, now);
       assert.equal(messagesSent.length, 1);
-      assert.match(messagesSent[0].content.text, /25 more players.*\(28 total spots\)/i);
+      assert.match(messagesSent[0].content.text, /25 spots left/i);
+      assert.match(messagesSent[0].content.text, /Need 1 player/i);
+      assert.ok(Array.isArray(messagesSent[0].content.mentions) && messagesSent[0].content.mentions.includes("14085552013@s.whatsapp.net"));
 
       // Simulate Parts 1 & 2 filling up and spillover Part 3 inheriting synced sentReminders
       part1State.status = "filled";
