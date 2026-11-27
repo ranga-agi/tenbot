@@ -5,7 +5,10 @@ const crypto = require('crypto');
 const {
   buildPollReminder,
   buildPollReminderText,
-  sendPollReminder
+  sendPollReminder,
+  handlePollCommand,
+  executePollTool,
+  parseTriggerReminderArgs
 } = require('../lib/commands/poll');
 
 const namesStore = require('../lib/names');
@@ -462,6 +465,79 @@ describe('Poll Reminder Format & @Mentions', () => {
           delete store[u.lid];
         }
       }
+    });
+  });
+
+  describe('Manual trigger reminder commands (!remind, !reminder, --poll, quoted poll, --group)', () => {
+    it('parses aliases, -f/--force, --poll, and quoted poll names', () => {
+      assert.deepEqual(parseTriggerReminderArgs('!reminder'), { isForce: false, specificPollId: null });
+      assert.deepEqual(parseTriggerReminderArgs('!reminders 7pm'), { isForce: false, specificPollId: '7pm' });
+      assert.deepEqual(parseTriggerReminderArgs('!remind -f "Tomorrow 7pm"'), { isForce: true, specificPollId: 'Tomorrow 7pm' });
+      assert.deepEqual(parseTriggerReminderArgs('!remind --poll=Friday 8am'), { isForce: false, specificPollId: 'Friday 8am' });
+      assert.deepEqual(parseTriggerReminderArgs('!forcereminders --poll "Sat 9am"'), { isForce: true, specificPollId: 'Sat 9am' });
+    });
+
+    it('routes !reminder, !pollremind, and quoted poll replies to only the matching poll in the current chat', async () => {
+      const chatA = '120363000000000001@g.us';
+      const chatB = '120363000000000002@g.us';
+      const now = new Date('2026-11-27T12:00:00-08:00').getTime();
+      const playAt7 = new Date(now + 7 * 3600 * 1000).toISOString();
+      const playAt9 = new Date(now + 9 * 3600 * 1000).toISOString();
+
+      const activePolls = new Map([
+        ['poll_a_7pm', { remoteJid: chatA, name: '🎾 Group A 7pm', when: 'Today 7pm', size: 4, options: ['Player 1', 'Player 2', 'Player 3', 'Player 4'], playAt: playAt7, status: 'active', voteBuffer: new Map() }],
+        ['poll_b_7pm', { remoteJid: chatB, name: '🎾 Group B 7pm', when: 'Today 7pm', size: 4, options: ['Player 1', 'Player 2', 'Player 3', 'Player 4'], playAt: playAt7, status: 'active', voteBuffer: new Map() }],
+        ['poll_b_9pm', { remoteJid: chatB, name: '🎾 Group B 9pm', when: 'Today 9pm', size: 4, options: ['Player 1', 'Player 2', 'Player 3', 'Player 4'], playAt: playAt9, status: 'active', voteBuffer: new Map() }]
+      ]);
+
+      const sentMessages = [];
+      const mockSock = {
+        user: { id: 'tenbot@s.whatsapp.net' },
+        sendMessage: async (jid, content, opts) => {
+          sentMessages.push({ jid, content, opts });
+          return { key: { id: `sent_${sentMessages.length}` } };
+        }
+      };
+      const context = {
+        activePolls,
+        recurringPolls: new Map(),
+        messageStore: new Map(),
+        persistPolls: () => {},
+        now
+      };
+
+      // 1. Scoped by current chat: !reminder 7pm in chatB triggers ONLY poll_b_7pm (never poll_a_7pm)
+      const r1 = await handlePollCommand(mockSock, '!reminder 7pm', chatB, 'Alice', 'alice@lid', null, context);
+      assert.equal(r1, true);
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0].jid, chatB);
+      assert.equal(sentMessages[0].opts.quoted.key.id, 'poll_b_7pm');
+
+      // 2. Replying/quoting a specific poll with !pollremind triggers ONLY that quoted poll
+      sentMessages.length = 0;
+      const quoteMsg = { message: { extendedTextMessage: { contextInfo: { stanzaId: 'poll_b_9pm' } } } };
+      const r2 = await handlePollCommand(mockSock, '!pollremind', chatB, 'Alice', 'alice@lid', quoteMsg, context);
+      assert.equal(r2, true);
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0].opts.quoted.key.id, 'poll_b_9pm');
+
+      // 3. Claude tool trigger_reminder matches by pollName and forwards force flag
+      sentMessages.length = 0;
+      const nightNow = new Date('2026-11-27T23:00:00-08:00').getTime();
+      const nightContext = { ...context, now: nightNow };
+      const r3 = await executePollTool(
+        mockSock,
+        'trigger_reminder',
+        { pollName: '9pm', force: true },
+        'Alice',
+        'alice@lid',
+        chatB,
+        null,
+        nightContext
+      );
+      assert.match(r3, /Reminder triggered/i);
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0].opts.quoted.key.id, 'poll_b_9pm');
     });
   });
 });
