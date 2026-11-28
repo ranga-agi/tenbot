@@ -231,8 +231,9 @@ describe('SCVCC cancelCourtReservation & poll release failure notifications', ()
         message: '⚠️ Could not cancel reservation `195152` (reservation still appears active at SCVCC).'
       });
 
-      const t0 = new Date('2026-11-28T10:00:00.000Z').getTime();
-      const playAt = t0 + 100 * 60 * 1000;
+      // Thu Nov 26, 2026 9:00 AM PST -> Sat Nov 28, 2026 6:00 PM PST (57h; 90% = Sat 12:18 PM PST, before 1:45 PM cutoff)
+      const t0 = new Date('2026-11-26T17:00:00.000Z').getTime();
+      const playAt = new Date('2026-11-29T02:00:00.000Z').getTime();
       const pollState = {
         remoteJid: TEST_GROUP_JID,
         createdAt: new Date(t0).toISOString(),
@@ -256,7 +257,7 @@ describe('SCVCC cancelCourtReservation & poll release failure notifications', ()
         sendMessage: async (jid, msg) => { sentGroupMessages.push({ jid, msg }); }
       };
 
-      await checkCourtReleasesForPoll(mockSock, 'poll_90_fail', pollState, { messageStore, persistPolls: () => {} }, t0 + 91 * 60 * 1000);
+      await checkCourtReleasesForPoll(mockSock, 'poll_90_fail', pollState, { messageStore, persistPolls: () => {} }, new Date('2026-11-28T20:25:00.000Z').getTime());
 
       assert.equal(sentGroupMessages.length, 1);
       assert.match(sentGroupMessages[0].msg.text, /Court 1.*has been cancelled/);

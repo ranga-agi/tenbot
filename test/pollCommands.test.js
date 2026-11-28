@@ -28,6 +28,7 @@ const {
   handleOnDemandCourtBooking,
   preBookCourtsForMatch,
   checkCourtReleasesForPoll,
+  computeCourtReleaseSchedule,
   checkCourtReleases,
   getPollVoters,
   sendPollReminder,
@@ -1809,14 +1810,12 @@ describe('pollCommands', () => {
     function makeOptHash(name) {
       return crypto.createHash('sha256').update(name).digest();
     }
-    const t0 = new Date('2026-10-20T08:00:00.000Z').getTime();
-    const playAt = new Date('2026-10-20T18:00:00.000Z').getTime(); // 10 hours = 600 mins
-    // 70% = t0 + 420 mins = 2026-10-20T15:00:00.000Z
-    // 70% warn = t0 + 415 mins = 2026-10-20T14:55:00.000Z
-    // 80% = t0 + 480 mins = 2026-10-20T16:00:00.000Z
-    // 80% warn = t0 + 475 mins = 2026-10-20T15:55:00.000Z
-    // 90% = t0 + 540 mins = 2026-10-20T17:00:00.000Z
-    // 90% warn = t0 + 535 mins = 2026-10-20T16:55:00.000Z
+    // Mon Oct 19 2026 01:40 PDT -> Tue Oct 20 2026 21:00 PDT (2600 mins; 4h15m cutoff = Tue 16:45 PDT)
+    const t0 = new Date('2026-10-19T08:40:00.000Z').getTime();
+    const playAt = new Date('2026-10-21T04:00:00.000Z').getTime();
+    // 70% = t0 + 1820 mins (Tue 08:00 PDT) | warn = t0 + 1815 mins (Tue 07:55 PDT)
+    // 80% = t0 + 2080 mins (Tue 12:20 PDT) | warn = t0 + 2075 mins (Tue 12:15 PDT)
+    // 90% = t0 + 2340 mins (Tue 16:40 PDT) | warn = t0 + 2335 mins (Tue 16:35 PDT)
 
     it('should send 5-min warning and cancel most recent court at 70% mark if 7 players for 3 courts (Example 1)', async () => {
       const messagesSent = [];
@@ -1867,8 +1866,8 @@ describe('pollCommands', () => {
 
       const context = { messageStore, persistPolls: () => {} };
 
-      // 1. At 5 mins before 70% (T0 + 415 mins)
-      const tWarn70 = t0 + 415 * 60 * 1000;
+      // 1. At 5 mins before 70% (T0 + 1815 mins)
+      const tWarn70 = t0 + 1815 * 60 * 1000;
       await checkCourtReleasesForPoll(mockSock, 'poll_ex1', pollState, context, tWarn70);
 
       assert.equal(pollState.courtReleaseWarningsSent.includes(70), true);
@@ -1876,8 +1875,8 @@ describe('pollCommands', () => {
       const warnMsg = messagesSent.find((m) => m.msg.text.includes('Court 3') && m.msg.text.includes('5 mins'));
       assert.ok(warnMsg, '5-min warning message should be sent for Court 3');
 
-      // 2. At 70% checkpoint (T0 + 420 mins)
-      const tCheck70 = t0 + 420 * 60 * 1000;
+      // 2. At 70% checkpoint (T0 + 1820 mins)
+      const tCheck70 = t0 + 1820 * 60 * 1000;
       await checkCourtReleasesForPoll(mockSock, 'poll_ex1', pollState, context, tCheck70);
 
       assert.equal(pollState.courtReleasesDone.includes(70), true);
@@ -1939,8 +1938,8 @@ describe('pollCommands', () => {
       });
       const context = { messageStore, persistPolls: () => {} };
 
-      // At warning time (T0 + 415 mins) -> sends warning
-      await checkCourtReleasesForPoll(mockSock, 'poll_heed', pollState, context, t0 + 415 * 60 * 1000);
+      // At warning time (T0 + 1815 mins) -> sends warning
+      await checkCourtReleasesForPoll(mockSock, 'poll_heed', pollState, context, t0 + 1815 * 60 * 1000);
       assert.equal(pollState.courtReleaseWarningsSent.includes(70), true);
 
       // Players heed warning! 2 more players vote -> 9 players now (needs 3 courts)
@@ -1952,9 +1951,9 @@ describe('pollCommands', () => {
         });
       }
 
-      // At checkpoint time (T0 + 420 mins)
+      // At checkpoint time (T0 + 1820 mins)
       messagesSent.length = 0;
-      await checkCourtReleasesForPoll(mockSock, 'poll_heed', pollState, context, t0 + 420 * 60 * 1000);
+      await checkCourtReleasesForPoll(mockSock, 'poll_heed', pollState, context, t0 + 1820 * 60 * 1000);
 
       assert.equal(pollState.courtReleasesDone.includes(70), true);
       assert.equal(pollState.prebookedCourts.length, 3, 'Court 3 should NOT be cancelled because 9 players need 3 courts');
@@ -2010,26 +2009,26 @@ describe('pollCommands', () => {
       });
       const context = { messageStore, persistPolls: () => {} };
 
-      // At 70% checkpoint (T0 + 420 mins) -> cancels 1 court (Court 3)
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex2', pollState, context, t0 + 420 * 60 * 1000);
+      // At 70% checkpoint (T0 + 1820 mins) -> cancels 1 court (Court 3)
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex2', pollState, context, t0 + 1820 * 60 * 1000);
       assert.equal(pollState.prebookedCourts.length, 2);
       assert.deepEqual(pollState.prebookedCourts.map(c => c.court), ['Court 1', 'Court 2']);
       assert.equal(pollState.slotLimit, undefined);
 
-      // At 80% warning (T0 + 475 mins) -> sends warning for Court 2
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex2', pollState, context, t0 + 475 * 60 * 1000);
+      // At 80% warning (T0 + 2075 mins) -> sends warning for Court 2
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex2', pollState, context, t0 + 2075 * 60 * 1000);
       assert.equal(pollState.courtReleaseWarningsSent.includes(80), true);
       const warn80 = messagesSent.find((m) => m.msg.text.includes('Court 2') && m.msg.text.includes('5 mins'));
       assert.ok(warn80, 'Warning sent for Court 2 before 80% mark');
 
-      // At 80% checkpoint (T0 + 480 mins) -> cancels Court 2
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex2', pollState, context, t0 + 480 * 60 * 1000);
+      // At 80% checkpoint (T0 + 2080 mins) -> cancels Court 2
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex2', pollState, context, t0 + 2080 * 60 * 1000);
       assert.equal(pollState.prebookedCourts.length, 1);
       assert.deepEqual(pollState.prebookedCourts.map(c => c.court), ['Court 1']);
       assert.equal(pollState.slotLimit, undefined);
 
-      // At 90% checkpoint (T0 + 540 mins) -> 3 players need 1 court, Court 1 stays!
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex2', pollState, context, t0 + 540 * 60 * 1000);
+      // At 90% checkpoint (T0 + 2340 mins) -> 3 players need 1 court, Court 1 stays!
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex2', pollState, context, t0 + 2340 * 60 * 1000);
       assert.equal(pollState.prebookedCourts.length, 1);
       assert.equal(pollState.prebookedCourts[0].court, 'Court 1');
     });
@@ -2082,8 +2081,8 @@ describe('pollCommands', () => {
       });
       const context = { messageStore, persistPolls: () => {} };
 
-      // At 70% mark (T0 + 420 mins) with 10 players -> no court cancelled
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex3', pollState, context, t0 + 420 * 60 * 1000);
+      // At 70% mark (T0 + 1820 mins) with 10 players -> no court cancelled
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex3', pollState, context, t0 + 1820 * 60 * 1000);
       assert.equal(pollState.prebookedCourts.length, 3);
       assert.equal(pollState.courtReleasesDone.includes(70), true);
 
@@ -2092,12 +2091,12 @@ describe('pollCommands', () => {
       voteBuffer.delete('voter9@s.whatsapp.net');
       voteBuffer.delete('voter10@s.whatsapp.net');
 
-      // At 80% warning (T0 + 475 mins) -> sends warning for Court 3
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex3', pollState, context, t0 + 475 * 60 * 1000);
+      // At 80% warning (T0 + 2075 mins) -> sends warning for Court 3
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex3', pollState, context, t0 + 2075 * 60 * 1000);
       assert.equal(pollState.courtReleaseWarningsSent.includes(80), true);
 
-      // At 80% checkpoint (T0 + 480 mins) -> cancels Court 3
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex3', pollState, context, t0 + 480 * 60 * 1000);
+      // At 80% checkpoint (T0 + 2080 mins) -> cancels Court 3
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex3', pollState, context, t0 + 2080 * 60 * 1000);
       assert.equal(pollState.prebookedCourts.length, 2);
       assert.equal(pollState.courtReleasesDone.includes(80), true);
       assert.deepEqual(pollState.prebookedCourts.map(c => c.court), ['Court 1', 'Court 2']);
@@ -2143,17 +2142,17 @@ describe('pollCommands', () => {
       const context = { messageStore, persistPolls: () => {} };
 
       // At 70% checkpoint -> cancels Court 3
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex4', pollState, context, t0 + 420 * 60 * 1000);
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex4', pollState, context, t0 + 1820 * 60 * 1000);
       assert.equal(pollState.prebookedCourts.length, 2);
       assert.equal(pollState.prebookedCourts.map(c => c.court).includes('Court 3'), false);
 
       // At 80% checkpoint -> cancels Court 2
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex4', pollState, context, t0 + 480 * 60 * 1000);
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex4', pollState, context, t0 + 2080 * 60 * 1000);
       assert.equal(pollState.prebookedCourts.length, 1);
       assert.equal(pollState.prebookedCourts.map(c => c.court).includes('Court 2'), false);
 
       // At 90% checkpoint -> cancels Court 1
-      await checkCourtReleasesForPoll(mockSock, 'poll_ex4', pollState, context, t0 + 540 * 60 * 1000);
+      await checkCourtReleasesForPoll(mockSock, 'poll_ex4', pollState, context, t0 + 2340 * 60 * 1000);
       assert.equal(pollState.prebookedCourts.length, 0);
       assert.equal(pollState.status, 'stopped');
       assert.equal(pollState.slotLimit, undefined);
@@ -2207,8 +2206,8 @@ describe('pollCommands', () => {
       });
       const context = { messageStore, persistPolls: () => {} };
 
-      // At 90% checkpoint (T0 + 540 mins) -> cancels both Court 3 and Court 2 at once!
-      await checkCourtReleasesForPoll(mockSock, 'poll_multi', pollState, context, t0 + 540 * 60 * 1000);
+      // At 90% checkpoint (T0 + 2340 mins) -> cancels both Court 3 and Court 2 at once!
+      await checkCourtReleasesForPoll(mockSock, 'poll_multi', pollState, context, t0 + 2340 * 60 * 1000);
       assert.equal(pollState.prebookedCourts.length, 1);
       assert.deepEqual(pollState.prebookedCourts.map(c => c.court), ['Court 1']);
       assert.equal(pollState.slotLimit, undefined);
@@ -2304,11 +2303,11 @@ describe('pollCommands', () => {
       const context = { activePolls, messageStore, persistPolls: () => {} };
 
       try {
-        await checkCourtReleases(mockSock, context, t0 + 415 * 60 * 1000); // 70% warn
-        await checkCourtReleases(mockSock, context, t0 + 420 * 60 * 1000); // 70%
-        await checkCourtReleases(mockSock, context, t0 + 475 * 60 * 1000); // 80% warn
-        await checkCourtReleases(mockSock, context, t0 + 480 * 60 * 1000); // 80%
-        await checkCourtReleases(mockSock, context, t0 + 540 * 60 * 1000); // 90%
+        await checkCourtReleases(mockSock, context, t0 + 1815 * 60 * 1000); // 70% warn
+        await checkCourtReleases(mockSock, context, t0 + 1820 * 60 * 1000); // 70%
+        await checkCourtReleases(mockSock, context, t0 + 2075 * 60 * 1000); // 80% warn
+        await checkCourtReleases(mockSock, context, t0 + 2080 * 60 * 1000); // 80%
+        await checkCourtReleases(mockSock, context, t0 + 2340 * 60 * 1000); // 90%
 
         assert.deepEqual(cancelledResIds, [], 'Must NOT cancel any court when 13 total voters need 4 courts');
         assert.equal(part1.prebookedCourts.length, 4);
@@ -2396,19 +2395,19 @@ describe('pollCommands', () => {
 
       try {
         // 70% checkpoint via checkCourtReleases -> cancels Court 4 once and syncs to part2
-        await checkCourtReleases(mockSock, context, t0 + 420 * 60 * 1000);
+        await checkCourtReleases(mockSock, context, t0 + 1820 * 60 * 1000);
         assert.deepEqual(cancelledResIds, ['res-4']);
         assert.deepEqual(part1.prebookedCourts.map((c) => c.court), ['Court 1', 'Court 2', 'Court 3']);
         assert.deepEqual(part2.prebookedCourts.map((c) => c.court), ['Court 1', 'Court 2', 'Court 3']);
 
         // Direct check on part2 at 80% -> cancels Court 3 once (7 unique voters need 2 courts, NOT 1)
-        await checkCourtReleasesForPoll(mockSock, 'poll_u2', part2, context, t0 + 480 * 60 * 1000);
+        await checkCourtReleasesForPoll(mockSock, 'poll_u2', part2, context, t0 + 2080 * 60 * 1000);
         assert.deepEqual(cancelledResIds, ['res-4', 'res-3']);
         assert.deepEqual(part1.prebookedCourts.map((c) => c.court), ['Court 1', 'Court 2']);
         assert.deepEqual(part2.prebookedCourts.map((c) => c.court), ['Court 1', 'Court 2']);
 
         // 90% checkpoint -> 7 unique voters need 2 courts, so Court 1 and Court 2 remain!
-        await checkCourtReleases(mockSock, context, t0 + 540 * 60 * 1000);
+        await checkCourtReleases(mockSock, context, t0 + 2340 * 60 * 1000);
         assert.deepEqual(cancelledResIds, ['res-4', 'res-3']);
         assert.equal(part1.prebookedCourts.length, 2);
         assert.equal(part2.prebookedCourts.length, 2);
@@ -2471,10 +2470,10 @@ describe('pollCommands', () => {
         assert.equal(pollState.status, 'stopped');
 
         // While stopped, neither warnings nor cancellations occur across 70%, 80%, 90%
-        await checkCourtReleases(mockSock, context, t0 + 415 * 60 * 1000);
-        await checkCourtReleases(mockSock, context, t0 + 420 * 60 * 1000);
-        await checkCourtReleases(mockSock, context, t0 + 480 * 60 * 1000);
-        await checkCourtReleasesForPoll(mockSock, 'poll_stop_test', pollState, context, t0 + 540 * 60 * 1000);
+        await checkCourtReleases(mockSock, context, t0 + 1815 * 60 * 1000);
+        await checkCourtReleases(mockSock, context, t0 + 1820 * 60 * 1000);
+        await checkCourtReleases(mockSock, context, t0 + 2080 * 60 * 1000);
+        await checkCourtReleasesForPoll(mockSock, 'poll_stop_test', pollState, context, t0 + 2340 * 60 * 1000);
 
         assert.deepEqual(cancelledResIds, []);
         assert.equal(pollState.prebookedCourts.length, 2);
@@ -2486,7 +2485,7 @@ describe('pollCommands', () => {
         assert.match(resumeReply, /automatic court releases are active/i);
         assert.equal(pollState.status, 'active');
 
-        await checkCourtReleasesForPoll(mockSock, 'poll_stop_test', pollState, context, t0 + 540 * 60 * 1000);
+        await checkCourtReleasesForPoll(mockSock, 'poll_stop_test', pollState, context, t0 + 2340 * 60 * 1000);
         assert.deepEqual(cancelledResIds, ['res-2']);
         assert.equal(pollState.prebookedCourts.length, 1);
       } finally {
@@ -2542,7 +2541,7 @@ describe('pollCommands', () => {
         assert.equal(part1.status, 'stopped');
         assert.equal(part2.status, 'stopped');
 
-        await checkCourtReleases(mockSock, context, t0 + 540 * 60 * 1000);
+        await checkCourtReleases(mockSock, context, t0 + 2340 * 60 * 1000);
         assert.deepEqual(cancelledResIds, []);
         assert.equal(part1.prebookedCourts.length, 4);
         assert.equal(part2.prebookedCourts.length, 4);
@@ -2553,6 +2552,277 @@ describe('pollCommands', () => {
       } finally {
         scvcc.cancelCourtReservation = origCancel;
       }
+    });
+
+    describe('cutoff & quiet-hours aware release scheduling', () => {
+      const courtCommands = require('../lib/commands/courtCommands');
+      const quietDefault = groupsConfig.parseQuietHours('22:00-07:00');
+      const quietOff = groupsConfig.parseQuietHours('off');
+
+      it('collapses 70% and 80% when both land in the same quiet-hours window to 07:05 AM while preserving 90%', () => {
+        // Wed 2026-10-21 10:00 PDT -> Fri 2026-10-23 18:00 PDT (56h)
+        // Raw 70% = Fri 01:12 PDT, Raw 80% = Fri 06:48 PDT (both in 22:00-07:00 quiet window -> shift to Fri 07:05 PDT)
+        // Raw 90% = Fri 12:24 PDT (outside quiet hours, <= Fri 13:45 PDT cutoff)
+        const createdAtMs = new Date('2026-10-21T17:00:00.000Z').getTime();
+        const playAtMs = new Date('2026-10-24T01:00:00.000Z').getTime();
+        const sched = computeCourtReleaseSchedule(
+          { createdAt: new Date(createdAtMs).toISOString(), playAt: new Date(playAtMs).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+
+        assert.equal(sched.withinCutoffAtCreation, false);
+        assert.equal(sched.optionBApplied, false);
+        assert.deepEqual(sched.checkpoints.map((c) => c.milestone), [80, 90]);
+        assert.equal(sched.checkpoints[0].checkpointTime, new Date('2026-10-23T14:05:00.000Z').getTime());
+        assert.equal(sched.checkpoints[0].warningTime, new Date('2026-10-23T14:00:00.000Z').getTime());
+        assert.equal(sched.checkpoints[1].checkpointTime, new Date('2026-10-23T19:24:00.000Z').getTime());
+      });
+
+      it('keeps all three milestones 70/80/90 exact when all fall in waking hours before cutoff', () => {
+        // Mon 01:40 PDT -> Tue 21:00 PDT (2600m)
+        const sched = computeCourtReleaseSchedule(
+          { createdAt: new Date(t0).toISOString(), playAt: new Date(playAt).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+        assert.deepEqual(sched.checkpoints.map((c) => c.milestone), [70, 80, 90]);
+        assert.equal(sched.checkpoints[0].checkpointTime, t0 + 1820 * 60 * 1000);
+        assert.equal(sched.checkpoints[1].checkpointTime, t0 + 2080 * 60 * 1000);
+        assert.equal(sched.checkpoints[2].checkpointTime, t0 + 2340 * 60 * 1000);
+      });
+
+      it('caps medium-lead poll 90% checkpoint at T-4h15m while keeping earlier milestones intact', () => {
+        // Created Wed 2026-10-21 08:00 PDT -> Thu 2026-10-22 19:00 PDT (35h; raw 90% = 15:30 PDT, latestSafe = 14:45 PDT)
+        const cMs = new Date('2026-10-21T15:00:00.000Z').getTime();
+        const pMs = new Date('2026-10-23T02:00:00.000Z').getTime();
+        const sched = computeCourtReleaseSchedule(
+          { createdAt: new Date(cMs).toISOString(), playAt: new Date(pMs).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+        assert.equal(sched.withinCutoffAtCreation, false);
+        assert.deepEqual(sched.checkpoints.map((c) => c.milestone), [70, 80, 90]);
+        // 70% = Thu 08:30 PDT, 80% = Thu 12:00 PDT, 90% capped to Thu 14:45 PDT (warn 14:40 PDT)
+        assert.equal(sched.checkpoints[0].checkpointTime, new Date('2026-10-22T15:30:00.000Z').getTime());
+        assert.equal(sched.checkpoints[1].checkpointTime, new Date('2026-10-22T19:00:00.000Z').getTime());
+        assert.equal(sched.checkpoints[2].checkpointTime, new Date('2026-10-22T21:45:00.000Z').getTime());
+        assert.equal(sched.checkpoints[2].warningTime, new Date('2026-10-22T21:40:00.000Z').getTime());
+      });
+
+      it('collapses short-order poll (6h before evening play) into a single 90% release at T-4h15m', async () => {
+        // Created Thu 2026-10-22 14:00 PDT -> Thu 2026-10-22 20:00 PDT (6h; deadline = 15:45 PDT, warn = 15:40 PDT)
+        const cMs = new Date('2026-10-22T21:00:00.000Z').getTime();
+        const pMs = new Date('2026-10-23T03:00:00.000Z').getTime();
+        const sched = computeCourtReleaseSchedule(
+          { createdAt: new Date(cMs).toISOString(), playAt: new Date(pMs).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+
+        assert.equal(sched.checkpoints.length, 1);
+        assert.equal(sched.checkpoints[0].milestone, 90);
+        assert.equal(sched.checkpoints[0].warningTime, new Date('2026-10-22T22:40:00.000Z').getTime());
+        assert.equal(sched.checkpoints[0].checkpointTime, new Date('2026-10-22T22:45:00.000Z').getTime());
+
+        const messagesSent = [];
+        const cancelledResIds = [];
+        const origCancel = scvcc.cancelCourtReservation;
+        scvcc.cancelCourtReservation = async (resId) => {
+          cancelledResIds.push(resId);
+          return { success: true };
+        };
+        const mockSock = { sendMessage: async (jid, msg) => messagesSent.push({ jid, msg }) };
+        const pollState = {
+          remoteJid: 'group1@g.us',
+          createdAt: new Date(cMs).toISOString(),
+          playAt: new Date(pMs).toISOString(),
+          options: Array.from({ length: 8 }, (_, i) => `Player ${i + 1}`),
+          size: 8,
+          type: 'fixed',
+          status: 'active',
+          prebookedCourts: [{ court: 'Court 1', player: 'P1' }, { court: 'Court 2', player: 'P2' }],
+          advanceBookedCourts: [{ court: 'Court 1', reservationId: 's-1' }, { court: 'Court 2', reservationId: 's-2' }],
+          courtReleaseWarningsSent: [],
+          courtReleasesDone: [],
+          voteBuffer: new Map()
+        };
+        const context = { messageStore: new Map(), persistPolls: () => {} };
+        try {
+          await checkCourtReleasesForPoll(mockSock, 'poll_short_6h', pollState, context, sched.checkpoints[0].warningTime);
+          assert.equal(messagesSent.length, 1);
+          assert.match(messagesSent[0].msg.text, /Court 1 and Court 2.*5 mins/);
+          assert.equal(pollState.prebookedCourts.length, 2);
+
+          await checkCourtReleasesForPoll(mockSock, 'poll_short_6h', pollState, context, sched.checkpoints[0].checkpointTime);
+          assert.deepEqual(cancelledResIds, ['s-2', 's-1']);
+          assert.equal(pollState.prebookedCourts.length, 0);
+          assert.equal(pollState.status, 'stopped');
+        } finally {
+          scvcc.cancelCourtReservation = origCancel;
+        }
+      });
+
+      it('skips online auto-cancel for ultra-short polls created inside the 4h SCVCC cutoff and alerts once', async () => {
+        // Created 2h before play (17:00 PDT for 19:00 PDT play)
+        const cMs = new Date('2026-10-23T00:00:00.000Z').getTime();
+        const pMs = new Date('2026-10-23T02:00:00.000Z').getTime();
+        const sched = computeCourtReleaseSchedule(
+          { createdAt: new Date(cMs).toISOString(), playAt: new Date(pMs).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+        assert.equal(sched.withinCutoffAtCreation, true);
+        assert.equal(sched.reason, 'within_cutoff');
+        assert.equal(sched.checkpoints.length, 0);
+
+        const messagesSent = [];
+        const notifications = [];
+        let cancelCalled = false;
+        const origCancel = scvcc.cancelCourtReservation;
+        const origNotify = courtCommands.sendBookingNotifications;
+        scvcc.cancelCourtReservation = async () => { cancelCalled = true; return { success: true }; };
+        courtCommands.sendBookingNotifications = async (sock, chatId, msg) => { notifications.push({ chatId, msg }); };
+        const mockSock = { sendMessage: async (jid, msg) => messagesSent.push({ jid, msg }) };
+        const pollState = {
+          remoteJid: 'group1@g.us',
+          createdAt: new Date(cMs).toISOString(),
+          playAt: new Date(pMs).toISOString(),
+          options: Array.from({ length: 4 }, (_, i) => `Player ${i + 1}`),
+          size: 4,
+          type: 'fixed',
+          status: 'active',
+          prebookedCourts: [{ court: 'Court 1', player: 'P1' }],
+          advanceBookedCourts: [{ court: 'Court 1', reservationId: 'ultra-1' }],
+          courtReleaseWarningsSent: [],
+          courtReleasesDone: [],
+          voteBuffer: new Map()
+        };
+        const context = { messageStore: new Map(), persistPolls: () => {} };
+        try {
+          await checkCourtReleasesForPoll(mockSock, 'poll_ultra', pollState, context, cMs + 40 * 60 * 1000);
+          await checkCourtReleasesForPoll(mockSock, 'poll_ultra', pollState, context, cMs + 100 * 60 * 1000);
+          assert.equal(cancelCalled, false, 'Must NOT call SCVCC cancel inside 4h cutoff');
+          assert.equal(pollState.prebookedCourts.length, 1, 'Must NOT strip court when SCVCC cannot auto-cancel');
+          assert.equal(messagesSent.length, 0, 'Must NOT falsely announce court cancelled to group');
+          assert.equal(notifications.length, 1, 'Should alert notification list once for manual management');
+          assert.match(notifications[0].msg, /Auto-Cancellation Skipped/i);
+        } finally {
+          scvcc.cancelCourtReservation = origCancel;
+          courtCommands.sendBookingNotifications = origNotify;
+        }
+      });
+
+      it('Case 1 (afternoon match): defers 70% milestone in quiet hours to quietEnd+5m (07:05 AM) with warning at 07:00 AM', () => {
+        // Created Wed 2026-10-21 11:00 PDT -> Thu 2026-10-22 15:00 PDT (28h)
+        // Raw 70% = Thu 06:36 PDT (quiet hours) -> Case 1 defers warn=07:00 PDT, release=07:05 PDT
+        // Raw 80% = Thu 09:24 PDT | 90% capped = Thu 10:45 PDT
+        const cMs = new Date('2026-10-21T18:00:00.000Z').getTime();
+        const pMs = new Date('2026-10-22T22:00:00.000Z').getTime();
+        const sched = computeCourtReleaseSchedule(
+          { createdAt: new Date(cMs).toISOString(), playAt: new Date(pMs).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+        assert.equal(sched.optionBApplied, false);
+        assert.deepEqual(sched.checkpoints.map((c) => c.milestone), [70, 80, 90]);
+        assert.equal(sched.checkpoints[0].warningTime, new Date('2026-10-22T14:00:00.000Z').getTime()); // 07:00 PDT
+        assert.equal(sched.checkpoints[0].checkpointTime, new Date('2026-10-22T14:05:00.000Z').getTime()); // 07:05 PDT
+        assert.equal(sched.checkpoints[1].checkpointTime, new Date('2026-10-22T16:24:00.000Z').getTime()); // 09:24 PDT
+        assert.equal(sched.checkpoints[2].checkpointTime, new Date('2026-10-22T17:45:00.000Z').getTime()); // 10:45 PDT
+      });
+
+      it('Case 2 Option B (morning 7:30 AM match): pulls deadline to quietStart-5m (9:55 PM night before, warn 9:50 PM)', async () => {
+        // Poll 1: 3-day advance (Wed 10:00 PDT -> Sat 07:30 PDT): 70% Fri 10:39 PDT, 80% Fri 17:36 PDT, 90% pulled to Fri 21:55 PDT
+        const cLong = new Date('2026-10-21T17:00:00.000Z').getTime();
+        const pSatMorning = new Date('2026-10-24T14:30:00.000Z').getTime(); // Sat Oct 24 07:30 PDT
+        const schedLong = computeCourtReleaseSchedule(
+          { createdAt: new Date(cLong).toISOString(), playAt: new Date(pSatMorning).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+        assert.equal(schedLong.optionBApplied, true);
+        assert.deepEqual(schedLong.checkpoints.map((c) => c.milestone), [70, 80, 90]);
+        assert.equal(schedLong.checkpoints[2].warningTime, new Date('2026-10-24T04:50:00.000Z').getTime()); // Fri 21:50 PDT
+        assert.equal(schedLong.checkpoints[2].checkpointTime, new Date('2026-10-24T04:55:00.000Z').getTime()); // Fri 21:55 PDT
+
+        // Poll 2: Medium/short order created Fri 10:00 PDT -> Sat 07:30 PDT: collapses to single Fri 21:55 PDT release
+        const cFri = new Date('2026-10-23T17:00:00.000Z').getTime();
+        const schedShort = computeCourtReleaseSchedule(
+          { createdAt: new Date(cFri).toISOString(), playAt: new Date(pSatMorning).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+        assert.equal(schedShort.optionBApplied, true);
+        assert.equal(schedShort.checkpoints.length, 1);
+        assert.equal(schedShort.checkpoints[0].milestone, 90);
+        assert.equal(schedShort.checkpoints[0].warningTime, new Date('2026-10-24T04:50:00.000Z').getTime());
+        assert.equal(schedShort.checkpoints[0].checkpointTime, new Date('2026-10-24T04:55:00.000Z').getTime());
+
+        // Verify end-to-end execution fires warning at 21:50 PDT and cancels at 21:55 PDT
+        const origGetQh = groupsConfig.getQuietHours;
+        const origCancel = scvcc.cancelCourtReservation;
+        groupsConfig.getQuietHours = () => quietDefault;
+        const cancelledIds = [];
+        scvcc.cancelCourtReservation = async (id) => { cancelledIds.push(id); return { success: true }; };
+        const sent = [];
+        const mockSock = { sendMessage: async (jid, msg) => sent.push({ jid, msg }) };
+        const pollState = {
+          remoteJid: 'group_morning@g.us',
+          createdAt: new Date(cFri).toISOString(),
+          playAt: new Date(pSatMorning).toISOString(),
+          options: ['P1', 'P2', 'P3', 'P4'],
+          size: 4,
+          type: 'fixed',
+          status: 'active',
+          prebookedCourts: [{ court: 'Court 1', player: 'P1' }],
+          advanceBookedCourts: [{ court: 'Court 1', reservationId: '195152' }],
+          courtReleaseWarningsSent: [],
+          courtReleasesDone: [],
+          voteBuffer: new Map()
+        };
+        const ctx = { messageStore: new Map(), persistPolls: () => {} };
+        try {
+          await checkCourtReleasesForPoll(mockSock, 'poll_optB', pollState, ctx, new Date('2026-10-24T04:50:00.000Z').getTime());
+          assert.equal(sent.length, 1);
+          assert.match(sent[0].msg.text, /5 mins/);
+          assert.equal(cancelledIds.length, 0);
+
+          await checkCourtReleasesForPoll(mockSock, 'poll_optB', pollState, ctx, new Date('2026-10-24T04:55:00.000Z').getTime());
+          assert.deepEqual(cancelledIds, ['195152']);
+          assert.equal(pollState.prebookedCourts.length, 0);
+        } finally {
+          groupsConfig.getQuietHours = origGetQh;
+          scvcc.cancelCourtReservation = origCancel;
+        }
+      });
+
+      it('handles 11:15 AM wake-up boundary, quiet-hours-created fallback, and disabled quiet hours cleanly', () => {
+        // 1) 11:15 AM PDT match: latestSafe = 07:00 PDT (warn 06:55 PDT), hardCutoff = 07:15 PDT.
+        // Deferring to 07:05 PDT (warn 07:00 PDT) still preserves 10m margin before 07:15 PDT hard cutoff.
+        const c1115 = new Date('2026-10-23T17:00:00.000Z').getTime();
+        const p1115 = new Date('2026-10-24T18:15:00.000Z').getTime(); // Sat 11:15 PDT
+        const sched1115 = computeCourtReleaseSchedule(
+          { createdAt: new Date(c1115).toISOString(), playAt: new Date(p1115).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+        assert.equal(sched1115.optionBApplied, false);
+        const lastCp = sched1115.checkpoints[sched1115.checkpoints.length - 1];
+        assert.equal(lastCp.warningTime, new Date('2026-10-24T14:00:00.000Z').getTime()); // 07:00 PDT
+        assert.equal(lastCp.checkpointTime, new Date('2026-10-24T14:05:00.000Z').getTime()); // 07:05 PDT
+
+        // 2) Poll created during quiet hours (Fri 22:30 PDT -> Sat 07:30 PDT): falls back to 03:15 PDT before SCVCC lock
+        const cLate = new Date('2026-10-24T05:30:00.000Z').getTime(); // Fri 22:30 PDT
+        const pMorning = new Date('2026-10-24T14:30:00.000Z').getTime(); // Sat 07:30 PDT
+        const schedLate = computeCourtReleaseSchedule(
+          { createdAt: new Date(cLate).toISOString(), playAt: new Date(pMorning).toISOString(), remoteJid: 'group1@g.us' },
+          { quietHours: quietDefault, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+        assert.equal(schedLate.optionBApplied, false);
+        assert.equal(schedLate.checkpoints.length, 1);
+        assert.equal(schedLate.checkpoints[0].checkpointTime, new Date('2026-10-24T10:15:00.000Z').getTime()); // Sat 03:15 PDT
+
+        // 3) Quiet hours disabled: Sat 07:30 PDT match created Fri 10:00 PDT uses Sat 03:15 PDT (no Option B pull-back)
+        const cFri = new Date('2026-10-23T17:00:00.000Z').getTime();
+        const schedNoQuiet = computeCourtReleaseSchedule(
+          { createdAt: new Date(cFri).toISOString(), playAt: new Date(pMorning).toISOString(), remoteJid: 'group_off@g.us' },
+          { quietHours: quietOff, cutoffMinutes: 240, safetyBufferMinutes: 15 }
+        );
+        assert.equal(schedNoQuiet.optionBApplied, false);
+        assert.equal(schedNoQuiet.checkpoints[schedNoQuiet.checkpoints.length - 1].checkpointTime, new Date('2026-10-24T10:15:00.000Z').getTime());
+      });
     });
   });
 
@@ -2749,8 +3019,8 @@ describe('pollCommands', () => {
         sendMessage: async (jid, msg, opts) => { messagesSent.push({ jid, msg, opts }); }
       };
 
-      const t0 = Date.now();
-      const playAt = t0 + 600 * 60 * 1000;
+      const t0 = new Date('2026-10-19T08:40:00.000Z').getTime();
+      const playAt = new Date('2026-10-21T04:00:00.000Z').getTime();
       const pollState = {
         remoteJid: 'group1@g.us',
         createdAt: new Date(t0).toISOString(),
@@ -2798,7 +3068,7 @@ describe('pollCommands', () => {
 
       try {
         // Step 1: Auto cancel Court 3 at 70% checkpoint
-        await checkCourtReleasesForPoll(mockSock, 'poll_e2e_rebook', pollState, context, t0 + 420 * 60 * 1000);
+        await checkCourtReleasesForPoll(mockSock, 'poll_e2e_rebook', pollState, context, t0 + 1820 * 60 * 1000);
 
         // Court 3 is cancelled and recorded in releasedCourts
         assert.equal(pollState.prebookedCourts.length, 2);
